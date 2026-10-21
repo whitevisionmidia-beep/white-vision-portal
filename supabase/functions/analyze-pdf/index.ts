@@ -2,8 +2,19 @@ import { requireAdmin } from "../_shared/admin.ts";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
-const geminiEndpoint =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent";
+const models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b"];
+
+class GeminiJsonParseError extends Error {}
+
+class GeminiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly retryable: boolean
+  ) {
+    super(message);
+  }
+}
 
 function base64(bytes: Uint8Array): string {
   let binary = "";
@@ -12,6 +23,156 @@ function base64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
   }
   return btoa(binary);
+}
+
+function cleanGeminiJson(text: string): string {
+  const withoutMarkdown = text
+    .replace(/^\uFEFF/, "")
+    .replace(/^\s*```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/, "")
+    .trim();
+  const jsonStart = withoutMarkdown.indexOf("{");
+  const jsonEnd = withoutMarkdown.lastIndexOf("}");
+  if (jsonStart < 0 || jsonEnd < jsonStart) {
+    throw new GeminiJsonParseError("Gemini não retornou um objeto JSON.");
+  }
+
+  const candidate = withoutMarkdown.slice(jsonStart, jsonEnd + 1);
+  let sanitized = "";
+  let inString = false;
+  for (let index = 0; index < candidate.length; index += 1) {
+    const character = candidate[index];
+    if (!inString) {
+      sanitized += character;
+      if (character === '"') inString = true;
+      continue;
+    }
+
+    if (character === "\\") {
+      const next = candidate[index + 1];
+      if (next && /["\\/bfnrtu]/.test(next)) {
+        sanitized += character + next;
+        index += 1;
+      } else {
+        sanitized += "\\\\";
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      let nextIndex = index + 1;
+      while (/\s/.test(candidate[nextIndex] || "")) nextIndex += 1;
+      const nextSignificant = candidate[nextIndex];
+      let nextAfterComma = nextIndex;
+      if (nextSignificant === ",") {
+        nextAfterComma += 1;
+        while (/\s/.test(candidate[nextAfterComma] || "")) nextAfterComma += 1;
+      }
+      const commaHasFollowingJsonValue =
+        nextSignificant !== "," ||
+        /["[{tfn0-9-]/.test(candidate[nextAfterComma] || "");
+      if (
+        nextSignificant &&
+        !/[:,}\]]/.test(nextSignificant) ||
+        (nextSignificant === "," && !commaHasFollowingJsonValue)
+      ) {
+        sanitized += '\\"';
+      } else {
+        sanitized += character;
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character.charCodeAt(0) < 0x20) {
+      if (character === "\n") sanitized += "\\n";
+      else if (character === "\r") sanitized += "\\r";
+      else if (character === "\t") sanitized += "\\t";
+      else sanitized += `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`;
+    } else {
+      sanitized += character;
+    }
+  }
+  return sanitized;
+}
+
+function repairGeminiJsonSeparators(json: string): string {
+  let repaired = "";
+  let inString = false;
+  for (let index = 0; index < json.length; index += 1) {
+    const character = json[index];
+    if (!inString) {
+      const scalar = json.slice(index).match(/^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/)?.[0];
+      if (scalar) {
+        const afterScalar = index + scalar.length;
+        let nextIndex = afterScalar;
+        while (/\s/.test(json[nextIndex] || "")) nextIndex += 1;
+        const next = json[nextIndex];
+        repaired += scalar;
+        if (
+          nextIndex > afterScalar &&
+          next &&
+          /["[{tfn0-9-]/.test(next)
+        ) {
+          repaired += ",";
+        }
+        index = afterScalar - 1;
+        continue;
+      }
+    }
+    if (!inString && character === ",") {
+      let nextIndex = index + 1;
+      while (/\s/.test(json[nextIndex] || "")) nextIndex += 1;
+      if (json[nextIndex] === "}" || json[nextIndex] === "]") continue;
+    }
+    repaired += character;
+
+    if (character === "\\") {
+      repaired += json[index + 1] || "";
+      index += 1;
+      continue;
+    }
+    if (character === '"') inString = !inString;
+    if (inString || (character !== "}" && character !== "]" && character !== '"')) continue;
+
+    let nextIndex = index + 1;
+    while (/\s/.test(json[nextIndex] || "")) nextIndex += 1;
+    const next = json[nextIndex];
+    if (
+      next &&
+      !/[,}:\]]/.test(next) &&
+      (character !== '"' || next === '"' || next === "{" || next === "[")
+    ) {
+      repaired += ",";
+    }
+  }
+  return repaired;
+}
+
+function parseGeminiJson(text: string) {
+  const sanitized = cleanGeminiJson(text);
+  try {
+    const parsed = JSON.parse(sanitized);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new GeminiJsonParseError("A resposta precisa ser um objeto JSON.");
+    }
+    return parsed;
+  } catch (firstError) {
+    try {
+      const parsed = JSON.parse(repairGeminiJsonSeparators(sanitized));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error("A resposta recuperada não é um objeto JSON.");
+      }
+      console.warn("Gemini JSON parsed after separator recovery.");
+      return parsed;
+    } catch (recoveryError) {
+      const detail = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+      const original = firstError instanceof Error ? firstError.message : String(firstError);
+      throw new GeminiJsonParseError(
+        `Resposta JSON inválida do Gemini; recuperação não foi possível (${detail}; original: ${original}).`
+      );
+    }
+  }
 }
 
 async function getGeminiKey(serviceClient: SupabaseClient) {
@@ -26,7 +187,11 @@ async function getGeminiKey(serviceClient: SupabaseClient) {
   return key as string;
 }
 
-async function callGemini(apiKey: string, pdfBase64: string, action: string) {
+async function callGemini(
+  apiKey: string,
+  pdfBase64: string,
+  action: string
+) {
   const prompt = action === "summarize"
     ? "Leia o PDF e retorne um resumo executivo curto e factual em português. Não invente informações."
     : `Analise o PDF do relatório de mídia indoor e retorne somente JSON válido.
@@ -46,28 +211,85 @@ Schema:
 }
 Frequência de loop deve preservar unidade como aparece (por exemplo 30s ou a cada 3 min). Meta diária: usar valor explícito; se não existir, dividir inserções do período pelo número de dias no histórico e arredondar. O resumo deve conter o nome do cliente e uma síntese fiel.`;
 
-  const response = await fetch(`${geminiEndpoint}?key=${encodeURIComponent(apiKey)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{
-        parts: [
-          { text: prompt },
-          { inlineData: { mimeType: "application/pdf", data: pdfBase64 } },
-        ],
-      }],
-      generationConfig: action === "summarize"
-        ? { maxOutputTokens: 1024 }
-        : { responseMimeType: "application/json", maxOutputTokens: 8192 },
-    }),
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(`Gemini ${response.status}: ${JSON.stringify(payload).slice(0, 1200)}`);
+  let lastRetryableError: GeminiRequestError | null = null;
+  for (const modelName of models) {
+    const endpoint =
+      `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { text: prompt },
+              { inlineData: { mimeType: "application/pdf", data: pdfBase64 } },
+            ],
+          }],
+          generationConfig: action === "summarize"
+            ? { maxOutputTokens: 1024 }
+            : {
+              responseMimeType: "application/json",
+              maxOutputTokens: 8192,
+            },
+        }),
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      lastRetryableError = new GeminiRequestError(
+        `Falha de rede ao chamar ${modelName}: ${detail}`,
+        503,
+        true
+      );
+      console.warn(`${modelName} indisponível; tentando o próximo modelo Gemini.`);
+      continue;
+    }
+
+    const responseText = await response.text();
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = responseText ? JSON.parse(responseText) : {};
+    } catch {
+      payload = { error: responseText.slice(0, 1200) };
+    }
+
+    if (!response.ok) {
+      const detail = JSON.stringify(payload).slice(0, 1200);
+      const retryable =
+        response.status === 429 ||
+        response.status === 503 ||
+        response.status === 404 ||
+        /high demand|overload|unavailable|resource_exhausted|service unavailable|model not found/i.test(detail);
+      const requestError = new GeminiRequestError(
+        `Gemini ${response.status} (${modelName}): ${detail}`,
+        response.status,
+        retryable
+      );
+      if (!retryable) throw requestError;
+
+      lastRetryableError = requestError;
+      console.warn(`${modelName} indisponível (${response.status}); tentando o próximo modelo Gemini.`);
+      continue;
+    }
+
+    const candidates = payload.candidates as
+      | Array<{ content?: { parts?: Array<{ text?: string }> } }>
+      | undefined;
+    const text = candidates?.[0]?.content?.parts
+      ?.map((part) => part.text || "")
+      .join("")
+      .trim();
+    if (!text) {
+      throw new GeminiRequestError(`Gemini não retornou conteúdo para ${modelName}.`, 502, false);
+    }
+
+    console.log(`Gemini respondeu usando ${modelName}.`);
+    return action === "summarize" ? text : parseGeminiJson(text);
   }
-  const text = payload?.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text || "").join("").trim();
-  if (!text) throw new Error("Gemini não retornou conteúdo.");
-  return action === "summarize" ? text : JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, ""));
+
+  throw lastRetryableError ||
+    new GeminiRequestError("Todos os modelos Gemini estão indisponíveis.", 503, true);
 }
 
 Deno.serve(async (request) => {
@@ -96,11 +318,18 @@ Deno.serve(async (request) => {
     const generated = await callGemini(apiKey, base64(new Uint8Array(await file.arrayBuffer())), action);
 
     if (action === "summarize") {
+      if (typeof generated !== "string") {
+        throw new Error("Gemini retornou um formato inesperado para o resumo.");
+      }
       const { error } = await serviceClient.from("pdf_reports")
         .update({ ai_summary: generated })
         .eq("id", uploadId);
       if (error) throw error;
       return jsonResponse({ resumoIA: generated });
+    }
+
+    if (typeof generated === "string") {
+      throw new Error("Gemini retornou texto em vez do JSON esperado para o relatório.");
     }
 
     if (!generated.clienteNome || !generated.resumoRelatorio) {
@@ -230,14 +459,38 @@ Deno.serve(async (request) => {
     const message = error instanceof Error ? error.message : String(error);
     console.error("analyze-pdf failed", message);
     if (uploadId) {
-      const url = Deno.env.get("SUPABASE_URL");
-      const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-      if (url && serviceRoleKey) {
-        const { createClient } = await import("npm:@supabase/supabase-js@2");
-        const service = createClient(url, serviceRoleKey);
-        await service.from("pdf_reports").update({ status: "falhou", error_message: message }).eq("id", uploadId);
+      try {
+        const url = Deno.env.get("SUPABASE_URL");
+        const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+        if (url && serviceRoleKey) {
+          const { createClient } = await import("npm:@supabase/supabase-js@2");
+          const service = createClient(url, serviceRoleKey);
+          const update = await service
+            .from("pdf_reports")
+            .update({ status: "falhou", error_message: message })
+            .eq("id", uploadId);
+          if (update.error) {
+            console.error("Failed to update PDF report status after analysis error.", update.error);
+          }
+        }
+      } catch (statusUpdateError) {
+        console.error("Could not persist the PDF analysis error status.", statusUpdateError);
       }
     }
-    return jsonResponse({ error: message }, /autenticação|sessão|acesso/i.test(message) ? 401 : 500);
+    const status = error instanceof GeminiJsonParseError
+      ? 422
+      : error instanceof GeminiRequestError
+      ? error.retryable ? 503 : 502
+      : /autenticação|sessão|acesso/i.test(message)
+      ? 401
+      : 500;
+    return jsonResponse({
+      error: message,
+      code: error instanceof GeminiJsonParseError
+        ? "INVALID_GEMINI_JSON"
+        : error instanceof GeminiRequestError
+        ? error.retryable ? "GEMINI_UNAVAILABLE" : "GEMINI_REQUEST_FAILED"
+        : "ANALYSIS_FAILED",
+    }, status);
   }
 });
