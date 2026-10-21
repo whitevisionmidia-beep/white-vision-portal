@@ -4,7 +4,7 @@
 
 # Portal White Vision
 
-Portal de clientes e painel administrativo White Vision, com API local em Vite e persistência no arquivo `data/whitevision-db.json`. O painel fica em `/admin`; cada campanha tem um link público individual no formato `/cliente/{slug}`, exibido no painel. A página raiz não mostra dados de cliente.
+Portal de clientes e painel administrativo White Vision, com API local em Vite e persistência no arquivo `data/whitevision-db.json`. A página inicial (`/`) apresenta opções para entrar no painel administrativo (`/admin`) ou acessar um portal de cliente pelo link/código exclusivo (`/cliente/{slug}`). O painel exige autenticação; cada portal público retorna somente os dados da campanha correspondente. O arquivo `vercel.json` direciona as rotas do frontend para a SPA.
 
 O banco local `data/whitevision-db.json` é ignorado pelo Git para impedir que dados de clientes e relatórios sejam publicados. Em um clone novo, o servidor cria um banco vazio na primeira inicialização.
 
