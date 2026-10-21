@@ -3,6 +3,8 @@ import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
 const models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"];
+const maxRetryCycles = 5;
+const retryDelayMs = 2_000;
 
 class GeminiJsonParseError extends Error {}
 
@@ -211,85 +213,134 @@ Schema:
 }
 Frequência de loop deve preservar unidade como aparece (por exemplo 30s ou a cada 3 min). Meta diária: usar valor explícito; se não existir, dividir inserções do período pelo número de dias no histórico e arredondar. O resumo deve conter o nome do cliente e uma síntese fiel.`;
 
-  let lastRetryableError: GeminiRequestError | null = null;
-  for (const modelName of models) {
-    const endpoint =
-      `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
-    let response: Response;
-    try {
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { text: prompt },
-              { inlineData: { mimeType: "application/pdf", data: pdfBase64 } },
-            ],
-          }],
-          generationConfig: action === "summarize"
-            ? { maxOutputTokens: 1024 }
-            : {
-              responseMimeType: "application/json",
-              maxOutputTokens: 8192,
-            },
-        }),
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      lastRetryableError = new GeminiRequestError(
-        `Falha de rede ao chamar ${modelName}: ${detail}`,
-        503,
-        true
-      );
-      console.warn(`${modelName} indisponível; tentando o próximo modelo Gemini.`);
-      continue;
+  let lastError: GeminiRequestError | null = null;
+  for (let cycle = 1; cycle <= maxRetryCycles; cycle += 1) {
+    let shouldRetryCycle = false;
+    for (const modelName of models) {
+      const endpoint =
+        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      let response: Response;
+      try {
+        response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: prompt },
+                { inlineData: { mimeType: "application/pdf", data: pdfBase64 } },
+              ],
+            }],
+            generationConfig: action === "summarize"
+              ? { maxOutputTokens: 1024 }
+              : {
+                responseMimeType: "application/json",
+                maxOutputTokens: 8192,
+              },
+          }),
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        lastError = new GeminiRequestError(
+          `Falha de rede ao chamar ${modelName}: ${detail}`,
+          503,
+          true
+        );
+        shouldRetryCycle = true;
+        console.warn(`Ciclo ${cycle}/${maxRetryCycles}: ${modelName} falhou na rede; tentando o próximo modelo.`);
+        continue;
+      }
+
+      let responseText: string;
+      try {
+        responseText = await response.text();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        lastError = new GeminiRequestError(
+          `Falha ao ler a resposta de ${modelName}: ${detail}`,
+          502,
+          true
+        );
+        shouldRetryCycle = true;
+        console.warn(`Ciclo ${cycle}/${maxRetryCycles}: falha ao ler a resposta de ${modelName}; tentando o próximo modelo.`);
+        continue;
+      }
+
+      let payload: Record<string, unknown> = {};
+      try {
+        payload = responseText ? JSON.parse(responseText) : {};
+      } catch {
+        payload = { error: responseText.slice(0, 1200) };
+      }
+
+      if (!response.ok) {
+        const detail = JSON.stringify(payload).slice(0, 1200);
+        const retryable =
+          response.status === 429 ||
+          response.status === 503 ||
+          /high demand|overload|unavailable|resource_exhausted|service unavailable/i.test(detail);
+        const fallbackOnly =
+          response.status === 404 ||
+          /model not found|not supported for generatecontent/i.test(detail);
+        const requestError = new GeminiRequestError(
+          `Gemini ${response.status} (${modelName}): ${detail}`,
+          response.status,
+          retryable
+        );
+        if (!retryable && !fallbackOnly) throw requestError;
+
+        lastError = requestError;
+        shouldRetryCycle ||= retryable;
+        console.warn(
+          `Ciclo ${cycle}/${maxRetryCycles}: ${modelName} indisponível (${response.status}); tentando o próximo modelo.`
+        );
+        continue;
+      }
+
+      const candidates = payload.candidates as
+        | Array<{ content?: { parts?: Array<{ text?: string }> } }>
+        | undefined;
+      const text = candidates?.[0]?.content?.parts
+        ?.map((part) => part.text || "")
+        .join("")
+        .trim();
+      if (!text) {
+        lastError = new GeminiRequestError(`Gemini não retornou conteúdo para ${modelName}.`, 502, true);
+        shouldRetryCycle = true;
+        console.warn(`Ciclo ${cycle}/${maxRetryCycles}: ${modelName} retornou conteúdo vazio; tentando o próximo modelo.`);
+        continue;
+      }
+
+      if (action === "summarize") {
+        console.log(`Gemini respondeu usando ${modelName} no ciclo ${cycle}.`);
+        return text;
+      }
+
+      try {
+        const report = parseGeminiJson(text);
+        console.log(`Gemini respondeu usando ${modelName} no ciclo ${cycle}.`);
+        return report;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        lastError = new GeminiRequestError(
+          `JSON inválido retornado por ${modelName}: ${detail}`,
+          502,
+          true
+        );
+        shouldRetryCycle = true;
+        console.warn(`Ciclo ${cycle}/${maxRetryCycles}: JSON inválido de ${modelName}; tentando o próximo modelo.`);
+      }
     }
 
-    const responseText = await response.text();
-    let payload: Record<string, unknown> = {};
-    try {
-      payload = responseText ? JSON.parse(responseText) : {};
-    } catch {
-      payload = { error: responseText.slice(0, 1200) };
+    if (!shouldRetryCycle) break;
+    if (cycle < maxRetryCycles) {
+      console.warn(`Todos os modelos falharam no ciclo ${cycle}; nova tentativa em ${retryDelayMs} ms.`);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
-
-    if (!response.ok) {
-      const detail = JSON.stringify(payload).slice(0, 1200);
-      const retryable =
-        response.status === 429 ||
-        response.status === 503 ||
-        response.status === 404 ||
-        /high demand|overload|unavailable|resource_exhausted|service unavailable|model not found/i.test(detail);
-      const requestError = new GeminiRequestError(
-        `Gemini ${response.status} (${modelName}): ${detail}`,
-        response.status,
-        retryable
-      );
-      if (!retryable) throw requestError;
-
-      lastRetryableError = requestError;
-      console.warn(`${modelName} indisponível (${response.status}); tentando o próximo modelo Gemini.`);
-      continue;
-    }
-
-    const candidates = payload.candidates as
-      | Array<{ content?: { parts?: Array<{ text?: string }> } }>
-      | undefined;
-    const text = candidates?.[0]?.content?.parts
-      ?.map((part) => part.text || "")
-      .join("")
-      .trim();
-    if (!text) {
-      throw new GeminiRequestError(`Gemini não retornou conteúdo para ${modelName}.`, 502, false);
-    }
-
-    console.log(`Gemini respondeu usando ${modelName}.`);
-    return action === "summarize" ? text : parseGeminiJson(text);
   }
 
-  throw lastRetryableError ||
-    new GeminiRequestError("Todos os modelos Gemini estão indisponíveis.", 503, true);
+  throw lastError ||
+    new GeminiRequestError("Todos os modelos Gemini falharam.", 503, true);
 }
 
 Deno.serve(async (request) => {
@@ -315,7 +366,16 @@ Deno.serve(async (request) => {
     if (fileError || !file) throw fileError || new Error("Arquivo PDF não encontrado.");
     const apiKey = await getGeminiKey(serviceClient);
     const action = body.action === "summarize" ? "summarize" : "analyze";
-    const generated = await callGemini(apiKey, base64(new Uint8Array(await file.arrayBuffer())), action);
+    let pdfBase64: string;
+    try {
+      const pdfBuffer = await file.arrayBuffer();
+      if (pdfBuffer.byteLength === 0) throw new Error("O arquivo está vazio.");
+      pdfBase64 = base64(new Uint8Array(pdfBuffer));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Não foi possível ler o PDF salvo no Storage: ${detail}`);
+    }
+    const generated = await callGemini(apiKey, pdfBase64, action);
 
     if (action === "summarize") {
       if (typeof generated !== "string") {
