@@ -5,12 +5,14 @@ import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 const models = [
   "gemini-1.5-flash",
   "gemini-1.5-flash-8b",
-  "gemini-2.0-flash-exp"
+  "gemini-2.0-flash-exp",
 ];
 const maxRetryRounds = 3;
 const retryDelayMs = 2_000;
 
 class GeminiJsonParseError extends Error {}
+
+class GeminiModelsExhaustedError extends Error {}
 
 class GeminiRequestError extends Error {
   constructor(
@@ -271,9 +273,8 @@ Frequência de loop deve preservar unidade como aparece (por exemplo 30s ou a ca
         return result;
       } catch (error) {
         lastError = error;
-        console.warn(
-          `Falha no modelo ${modelName} (rodada ${round}/${maxRetryRounds}). Tentando o próximo modelo.`
-        );
+        console.warn(`[Fallback] Falha no modelo ${modelName}, tentando o próximo...`);
+        continue;
       }
     }
 
@@ -285,12 +286,9 @@ Frequência de loop deve preservar unidade como aparece (por exemplo 30s ou a ca
     }
   }
 
-  if (lastError instanceof GeminiRequestError) throw lastError;
   const detail = lastError instanceof Error ? lastError.message : String(lastError);
-  throw new GeminiRequestError(
-    `Todos os modelos Gemini falharam. Último erro: ${detail}`,
-    503,
-    true
+  throw new GeminiModelsExhaustedError(
+    `Todos os modelos Gemini falharam após ${maxRetryRounds} rodadas. Último erro: ${detail}`
   );
 }
 
@@ -490,6 +488,8 @@ Deno.serve(async (request) => {
     }
     const status = error instanceof GeminiJsonParseError
       ? 422
+      : error instanceof GeminiModelsExhaustedError
+      ? 500
       : error instanceof GeminiRequestError
       ? error.retryable ? 503 : 502
       : /autenticação|sessão|acesso/i.test(message)
@@ -499,6 +499,8 @@ Deno.serve(async (request) => {
       error: message,
       code: error instanceof GeminiJsonParseError
         ? "INVALID_GEMINI_JSON"
+        : error instanceof GeminiModelsExhaustedError
+        ? "GEMINI_MODELS_EXHAUSTED"
         : error instanceof GeminiRequestError
         ? error.retryable ? "GEMINI_UNAVAILABLE" : "GEMINI_REQUEST_FAILED"
         : "ANALYSIS_FAILED",
