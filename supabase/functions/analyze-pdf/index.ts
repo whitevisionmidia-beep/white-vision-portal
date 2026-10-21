@@ -3,8 +3,9 @@ import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
 const models = [
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite"
+  "gemini-1.5-flash",
+  "gemini-1.5-flash-8b",
+  "gemini-2.0-flash-exp"
 ];
 const maxRetryRounds = 3;
 const retryDelayMs = 2_000;
