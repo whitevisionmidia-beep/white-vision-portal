@@ -1,0 +1,11 @@
+node_modules/
+build/
+dist/
+coverage/
+data/media/
+data/report-pdfs/
+data/whitevision-db.json
+.DS_Store
+*.log
+.env*
+!.env.example
