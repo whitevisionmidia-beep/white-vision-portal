@@ -1,28 +1,43 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
-
 # Portal White Vision
 
-Portal de clientes e painel administrativo White Vision, com API local em Vite e persistência no arquivo `data/whitevision-db.json`. A página inicial (`/`) e `/login` direcionam ao acesso do painel administrativo (`/admin`), que exige autenticação. Cada portal público tem um link exclusivo `/c/{slug}`; o painel administrativo inclui a ação **Copiar Link do Cliente**. A rota antiga `/cliente/{slug}` redireciona para o novo endereço. O arquivo `vercel.json` direciona todas as rotas do frontend para a SPA.
+Portal White Vision com React/Vite, Supabase Auth, Postgres, Storage e Edge Functions. O painel mestre fica em `/`, `/login` e `/admin`. Cada campanha tem um endereço público exclusivo `/c/{slug}`; o painel oferece **Copiar Link do Cliente**. A rota anterior `/cliente/{slug}` redireciona ao novo link. O `vercel.json` reescreve as rotas do frontend para a SPA.
 
-O banco local `data/whitevision-db.json` é ignorado pelo Git para impedir que dados de clientes e relatórios sejam publicados. Em um clone novo, o servidor cria um banco vazio na primeira inicialização.
+## Configuração do Supabase
 
-## Execução local
+1. Crie `.env` a partir de `.env.example` e defina `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`. A anon key é pública; nunca coloque a `service_role` ou a chave Gemini em variáveis `VITE_*`.
+2. Aplique o schema/RLS e crie os buckets com Supabase CLI:
 
-**Prerequisites:** Node.js 20 or newer
+   ```sh
+   npx supabase login
+   npx supabase link --project-ref dfyzynhymcwaousvtzkp
+   npx supabase db push
+   npx supabase functions deploy gemini-admin
+   npx supabase functions deploy analyze-pdf
+   ```
 
-1. Instale as dependências com `npm install`.
-2. Copie `.env.example` para `.env` e defina `ADMIN_USERNAME`, `ADMIN_PASSWORD` e `SESSION_SECRET` (mínimo de 32 caracteres).
-3. Configure `GEMINI_API_KEY` no mesmo `.env` para importar relatórios PDF e usar o assistente. A chave é usada somente no servidor; também pode ser substituída temporariamente no painel administrativo (a substituição dura até o servidor reiniciar). Use **Testar conexão com Gemini** no painel para verificar a chave com uma solicitação mínima, sem enviar conteúdo de cliente. O processamento usa `gemini-3.5-flash` e tenta `gemini-3.5-flash-lite` em indisponibilidade temporária. PDFs até 10 MB são processados no backend; as citações geradas pelo Gemini são comparadas com o texto extraído localmente e PDFs escaneados sem texto selecionável são recusados.
-4. Inicie com `npm run dev`. Admin: `/` ou `/admin` (login obrigatório); clientes: link dedicado `/c/{slug}` (sem login).
-5. Execute `npm run lint` e `npm run build` para validar o projeto.
-6. Para executar o build em produção com o backend e a API ativos, use `npm start` após o build.
+3. No Supabase Auth, crie o usuário administrador `whitevisionmidia@gmail.com`. Depois, execute no SQL Editor, substituindo apenas o email se necessário:
 
-As sessões são assinadas no servidor e armazenadas em cookie `HttpOnly`, `SameSite=Strict`, com validade de 8 horas. O painel e as APIs de administração exigem uma sessão válida. Cadastre clientes no painel para criar links exclusivos aleatórios; cada link só retorna o relatório e os arquivos daquele cliente. Uploads aceitam somente MP4, PNG e JPG, validam assinatura e tipo do arquivo e são guardados fora da pasta pública em `data/media`, com limite de 100 MB por arquivo. Use **Editar dados** para alterar título, descrição ou cliente destinatário; para substituir o arquivo, remova-o e envie a nova versão. A seção **Logo White Vision** permite substituir a imagem por um PNG de até 5 MB, com validação de conteúdo. Os arquivos de mídia são removidos junto com o cliente. Em produção, use armazenamento de arquivos persistente e compartilhado entre instâncias.
+   ```sql
+   insert into public.admin_users (user_id)
+   select id from auth.users
+   where email = 'whitevisionmidia@gmail.com'
+   on conflict (user_id) do update set enabled = true;
+   ```
 
-O upload de PDF exige selecionar um cliente existente (ou cadastrá-lo no próprio formulário). O arquivo é salvo primeiro, de forma privada, em `data/report-pdfs`, relido do disco, convertido para Base64 e enviado ao Gemini via `inlineData` com MIME `application/pdf`. A chamada não configura timeout de 30 segundos; o SDK `@google/genai` aguarda a resposta, que deve ser JSON e é validada após remover eventuais cercas Markdown. A resposta deve conter nome do cliente e resumo geral, além de estruturar métricas do dashboard (`insercoesPeriodo`, `metaDiaria`, `frequenciaLoop`, `telasAtivas`, `desempenhoPorTela` e `historicoDiario`). O backend mapeia esses campos para as estruturas usadas pelos cards e gráficos, mantém dados legados quando uma métrica opcional não vier no PDF e grava o perfil junto ao histórico do envio. O portal público atualiza os dados periodicamente, sem exigir recarregamento manual. Em caso de indisponibilidade temporária, o sistema tenta `gemini-3.5-flash-lite`. O backend registra o modelo/tamanho do arquivo antes da chamada, o tamanho da resposta depois e erros com mensagem e stack, sem registrar a chave nem o conteúdo do PDF. Falhas de análise mantêm o PDF e exibem o erro específico retornado pelo Gemini ou pela validação local. Cada item do histórico pode ser removido, o que também apaga o arquivo físico. Citações fornecidas são comparadas com o texto/página do PDF; isso ainda exige revisão humana para conferir associação e interpretação dos dados. A marca usa `public/white-vision-logo.png`; substitua por um PNG oficial transparente mantendo esse caminho para atualizar ambos os cabeçalhos.
+4. Configure um secret Gemini para a Edge Function:
 
-O perfil do cliente também oferece configuração White Label salva por campanha: cor do gabinete do totem vertical, texto do adesivo superior, URL segura de logo (HTTPS ou caminho local) e cor primária dos botões de renovação e download. O vídeo é exibido limpo em proporção 9:16, com faixa de texto acima da tela e logo abaixo, sem sobreposições nos controles. O portal usa valores padrão escuros/White Vision quando não há tema personalizado. Uploads de logo no painel aceitam PNG, JPEG/JPG, WEBP e SVG; são convertidos no navegador para PNG antes de enviados, para preservar compatibilidade e evitar servir SVG não rasterizado.
+   ```sh
+   npx supabase secrets set GEMINI_API_KEY="SUA_CHAVE_GEMINI"
+   ```
 
-No perfil White Label, o adesivo superior aceita várias linhas, e o tamanho da logo (20–150 px) e a cor do fundo da área da logo podem ser configurados. Os cards por tela exibem o total do período, a média diária individual calculada sobre os dias do histórico disponível e o status operacional da tela.
+   Ou entre no painel como administrador e salve a chave na seção de configuração Gemini; ela fica em `private_settings`, tabela sem acesso do navegador, e é lida somente pela Edge Function.
+
+5. Na Vercel, configure `VITE_SUPABASE_URL=https://dfyzynhymcwaousvtzkp.supabase.co` e `VITE_SUPABASE_ANON_KEY` para Production, Preview e Development, e faça novo deploy.
+
+## Desenvolvimento e validação
+
+Requer Node.js 20 ou superior. Instale dependências com `npm install`, configure `.env` e execute `npm run dev`. O frontend acessa Supabase diretamente com sessão Auth persistente e RLS; a chave Gemini permanece nas Edge Functions. Execute `npm run lint` e `npm run build`.
+
+As tabelas e políticas estão em `supabase/migrations`. Administradores são provisionados explicitamente em `admin_users`; não existe cadastro público de administradores. O bucket `client-media` permite leitura pública de arquivos de mídia endereçados por UUID e gravação somente por admins; `report-pdfs` é privado e acessível somente por admins/Edge Functions.
+
+O totem White Label, métricas por tela, logos, relatórios e dados de campanha são persistidos no Postgres/Storage. Processamento PDF e operações secretas Gemini são executados na Edge Function autenticada; não exponha service role ou Gemini API key no frontend.

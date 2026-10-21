@@ -22,7 +22,7 @@ import {
   updateGeminiApiKey,
   uploadClientThemeLogo,
   PdfImportError,
-} from "../lib/adminApi";
+} from "../lib/supabaseAdminApi";
 import type {
   CampanhaCliente,
   RelatorioDiarioTela,
@@ -33,6 +33,7 @@ import type {
 } from "../types/adminDb";
 import type { RelatorioData } from "../types/whiteVision";
 import { DEFAULT_CLIENT_THEME } from "../types/whiteVision";
+import { getPublicMediaUrl } from "../lib/supabase";
 
 function formatDia(isoDate: string): string {
   const [, month, day] = isoDate.split("-");
@@ -640,9 +641,13 @@ export function AdminPage() {
         <div className="max-w-6xl mx-auto px-4 py-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div className="flex items-center gap-4">
             <img
-              src={`/white-vision-logo.png?v=${logoRevision}`}
+              src={`${getPublicMediaUrl("branding/white-vision-logo.png")}?v=${logoRevision}`}
               alt="White Vision"
               translate="no"
+              onError={(event) => {
+                event.currentTarget.onerror = null;
+                event.currentTarget.src = "/white-vision-logo.png";
+              }}
               className="h-12 w-auto object-contain"
             />
             <div>
@@ -761,8 +766,12 @@ export function AdminPage() {
           </div>
           <div className="inline-flex rounded-lg bg-slate-950 p-3">
             <img
-              src={`/white-vision-logo.png?v=${logoRevision}`}
+              src={`${getPublicMediaUrl("branding/white-vision-logo.png")}?v=${logoRevision}`}
               alt="Pré-visualização da logo White Vision"
+              onError={(event) => {
+                event.currentTarget.onerror = null;
+                event.currentTarget.src = "/white-vision-logo.png";
+              }}
               className="h-14 max-w-64 object-contain"
             />
           </div>

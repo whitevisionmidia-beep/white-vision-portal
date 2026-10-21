@@ -5,12 +5,12 @@ import {
   fetchPublicClientReport,
   login as authenticate,
   logout,
-} from "./lib/adminApi";
+} from "./lib/supabaseAdminApi";
 import { AdminPage } from "./pages/AdminPage";
 import type { RelatorioData } from "./types/whiteVision";
 
-function LoginPage({ onLogin }: { onLogin: (username: string, password: string) => Promise<void> }) {
-  const [username, setUsername] = useState("");
+function LoginPage({ onLogin }: { onLogin: (email: string, password: string) => Promise<void> }) {
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -20,7 +20,7 @@ function LoginPage({ onLogin }: { onLogin: (username: string, password: string) 
     setSubmitting(true);
     setError(null);
     try {
-      await onLogin(username, password);
+      await onLogin(email, password);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -44,12 +44,13 @@ function LoginPage({ onLogin }: { onLogin: (username: string, password: string) 
           </p>
         )}
         <label className="block text-sm space-y-1">
-          <span className="text-slate-300">Usuário</span>
+          <span className="text-slate-300">E-mail</span>
           <input
+            type="email"
             autoComplete="username"
             required
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
             className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
           />
         </label>
@@ -154,8 +155,8 @@ function AdminApplication() {
       .finally(() => setCheckingSession(false));
   }, []);
 
-  const handleLogin = async (username: string, password: string) => {
-    await authenticate(username, password);
+  const handleLogin = async (email: string, password: string) => {
+    await authenticate(email, password);
     setSessionError(null);
     setAuthenticated(true);
   };
