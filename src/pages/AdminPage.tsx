@@ -175,6 +175,20 @@ export function AdminPage() {
     window.setTimeout(() => setMessage(null), 2500);
   };
 
+  const handleCopyClientLink = async (slug: string) => {
+    const link = `${window.location.origin}/c/${encodeURIComponent(slug)}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      flash("Link do cliente copiado.");
+    } catch (err) {
+      setError(
+        `Não foi possível copiar o link automaticamente: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
+
   const handleSaveCampanha = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!campanhaDraft) return;
@@ -708,22 +722,31 @@ export function AdminPage() {
                     {campaign.clienteNome} — {campaign.campanhaNome}
                   </p>
                   <a
-                    href={`/cliente/${encodeURIComponent(campaign.slug)}`}
+                    href={`/c/${encodeURIComponent(campaign.slug)}`}
                     target="_blank"
                     rel="noreferrer"
                     className="break-all text-sm text-sky-400 underline underline-offset-4"
                   >
-                    {window.location.origin}/cliente/{campaign.slug}
+                    {window.location.origin}/c/{campaign.slug}
                   </a>
                 </div>
-                <button
-                  type="button"
-                  disabled={saving}
-                  onClick={() => void handleDeleteClient(campaign)}
-                  className="self-start rounded-lg border border-rose-500/40 px-3 py-1.5 text-sm text-rose-300 disabled:opacity-60"
-                >
-                  Remover cliente
-                </button>
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyClientLink(campaign.slug)}
+                    className="self-start rounded-lg border border-sky-500/40 px-3 py-1.5 text-sm text-sky-200 hover:bg-sky-500/10"
+                  >
+                    Copiar Link do Cliente
+                  </button>
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => void handleDeleteClient(campaign)}
+                    className="self-start rounded-lg border border-rose-500/40 px-3 py-1.5 text-sm text-rose-300 disabled:opacity-60"
+                  >
+                    Remover cliente
+                  </button>
+                </div>
               </li>
             ))}
           </ul>

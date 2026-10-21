@@ -1,11 +1,7 @@
 {
   "rewrites": [
     {
-      "source": "/admin",
-      "destination": "/index.html"
-    },
-    {
-      "source": "/cliente/:slug",
+      "source": "/(.*)",
       "destination": "/index.html"
     }
   ]

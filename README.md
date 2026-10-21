@@ -4,7 +4,7 @@
 
 # Portal White Vision
 
-Portal de clientes e painel administrativo White Vision, com API local em Vite e persistência no arquivo `data/whitevision-db.json`. A página inicial (`/`) apresenta opções para entrar no painel administrativo (`/admin`) ou acessar um portal de cliente pelo link/código exclusivo (`/cliente/{slug}`). O painel exige autenticação; cada portal público retorna somente os dados da campanha correspondente. O arquivo `vercel.json` direciona as rotas do frontend para a SPA.
+Portal de clientes e painel administrativo White Vision, com API local em Vite e persistência no arquivo `data/whitevision-db.json`. A página inicial (`/`) e `/login` direcionam ao acesso do painel administrativo (`/admin`), que exige autenticação. Cada portal público tem um link exclusivo `/c/{slug}`; o painel administrativo inclui a ação **Copiar Link do Cliente**. A rota antiga `/cliente/{slug}` redireciona para o novo endereço. O arquivo `vercel.json` direciona todas as rotas do frontend para a SPA.
 
 O banco local `data/whitevision-db.json` é ignorado pelo Git para impedir que dados de clientes e relatórios sejam publicados. Em um clone novo, o servidor cria um banco vazio na primeira inicialização.
 
@@ -15,7 +15,7 @@ O banco local `data/whitevision-db.json` é ignorado pelo Git para impedir que d
 1. Instale as dependências com `npm install`.
 2. Copie `.env.example` para `.env` e defina `ADMIN_USERNAME`, `ADMIN_PASSWORD` e `SESSION_SECRET` (mínimo de 32 caracteres).
 3. Configure `GEMINI_API_KEY` no mesmo `.env` para importar relatórios PDF e usar o assistente. A chave é usada somente no servidor; também pode ser substituída temporariamente no painel administrativo (a substituição dura até o servidor reiniciar). Use **Testar conexão com Gemini** no painel para verificar a chave com uma solicitação mínima, sem enviar conteúdo de cliente. O processamento usa `gemini-3.5-flash` e tenta `gemini-3.5-flash-lite` em indisponibilidade temporária. PDFs até 10 MB são processados no backend; as citações geradas pelo Gemini são comparadas com o texto extraído localmente e PDFs escaneados sem texto selecionável são recusados.
-4. Inicie com `npm run dev`. Admin: `/admin` (login obrigatório); clientes: link dedicado `/cliente/{slug}` (sem login).
+4. Inicie com `npm run dev`. Admin: `/` ou `/admin` (login obrigatório); clientes: link dedicado `/c/{slug}` (sem login).
 5. Execute `npm run lint` e `npm run build` para validar o projeto.
 6. Para executar o build em produção com o backend e a API ativos, use `npm start` após o build.
 
