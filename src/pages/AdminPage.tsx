@@ -73,7 +73,10 @@ export function AdminPage() {
     clientPath: string;
   } | null>(null);
   const [geminiApiKey, setGeminiApiKey] = useState("");
-  const [geminiKeyStatus, setGeminiKeyStatus] = useState<"ambiente" | "memoria" | "ausente">("ausente");
+  const [geminiKeyStatus, setGeminiKeyStatus] = useState<
+    "ambiente" | "memoria" | "ausente" | "indisponivel"
+  >("ausente");
+  const [geminiStatusError, setGeminiStatusError] = useState<string | null>(null);
   const [savingGeminiKey, setSavingGeminiKey] = useState(false);
   const [testingGemini, setTestingGemini] = useState(false);
   const [logoFile, setLogoFile] = useState<File | null>(null);
@@ -100,7 +103,13 @@ export function AdminPage() {
     try {
       const [payload, keyConfig] = await Promise.all([
         fetchEstado(),
-        fetchGeminiKeyStatus(),
+        fetchGeminiKeyStatus().then(
+          (result) => ({ result, error: null }),
+          (statusError: unknown) => ({
+            result: null,
+            error: statusError instanceof Error ? statusError.message : String(statusError),
+          })
+        ),
       ]);
       setDb(payload.db);
       setCampanhaDraft(payload.db.campanhas[0] || null);
@@ -109,7 +118,15 @@ export function AdminPage() {
       setVideos(payload.db.videos);
       setMediaCampaignId(payload.db.campanhas[0]?.id || "");
       setPdfClientId(payload.db.campanhas[0]?.id || "");
-      setGeminiKeyStatus(keyConfig.status);
+      if (keyConfig.result) {
+        setGeminiKeyStatus(keyConfig.result.status);
+        setGeminiStatusError(null);
+      } else {
+        setGeminiKeyStatus("indisponivel");
+        setGeminiStatusError(
+          `Não foi possível consultar a configuração Gemini: ${keyConfig.error}. Implante a Edge Function "gemini-admin" para habilitar essas operações.`
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -801,14 +818,27 @@ export function AdminPage() {
             <h2 className="text-lg font-bold text-white">Configuração da chave Gemini</h2>
             <p className="text-sm text-slate-400">
               Status:{" "}
-              <span className={geminiKeyStatus === "ausente" ? "text-amber-300" : "text-emerald-300"}>
+              <span
+                className={
+                  geminiKeyStatus === "ausente" || geminiKeyStatus === "indisponivel"
+                    ? "text-amber-300"
+                    : "text-emerald-300"
+                }
+              >
                 {geminiKeyStatus === "ambiente"
                   ? "configurada no .env do servidor"
                   : geminiKeyStatus === "memoria"
                     ? "configurada em memória até reiniciar o servidor"
-                    : "não configurada"}
+                    : geminiKeyStatus === "indisponivel"
+                      ? "Edge Function gemini-admin indisponível"
+                      : "não configurada"}
               </span>
             </p>
+            {geminiStatusError && (
+              <p role="status" className="mt-2 text-sm text-amber-200">
+                {geminiStatusError}
+              </p>
+            )}
           </div>
           <form onSubmit={handleSaveGeminiKey} className="flex flex-col sm:flex-row sm:items-end gap-3">
             <label className="text-sm space-y-1 flex-1">
@@ -834,7 +864,11 @@ export function AdminPage() {
           <button
             type="button"
             onClick={() => void handleTestGemini()}
-            disabled={testingGemini || geminiKeyStatus === "ausente"}
+            disabled={
+              testingGemini ||
+              geminiKeyStatus === "ausente" ||
+              geminiKeyStatus === "indisponivel"
+            }
             className="rounded-xl border border-violet-400/50 px-4 py-2.5 text-sm font-semibold text-violet-200 disabled:opacity-60"
           >
             {testingGemini ? "Testando conexão..." : "Testar conexão com Gemini"}

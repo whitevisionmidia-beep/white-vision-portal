@@ -175,7 +175,7 @@ export async function fetchEstado(): Promise<{ db: WhiteVisionDb }> {
   return asDb(await snapshot());
 }
 
-export type GeminiKeyStatus = "ambiente" | "memoria" | "ausente";
+export type GeminiKeyStatus = "ambiente" | "memoria" | "ausente" | "indisponivel";
 
 async function invokeGeminiAdmin<T>(body: Row): Promise<T> {
   const { data, error } = await getSupabase().functions.invoke("gemini-admin", { body });
