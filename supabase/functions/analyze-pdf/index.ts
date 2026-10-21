@@ -3,11 +3,11 @@ import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
 const models = [
-  "gemini-2.0-flash-exp",
-  "gemini-1.5-flash-latest",
-  "gemini-1.5-flash",
-  "gemini-1.5-pro-latest"
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite"
 ];
+const maxRetryRounds = 3;
+const retryDelayMs = 2_000;
 
 class GeminiJsonParseError extends Error {}
 
@@ -217,59 +217,70 @@ Schema:
 Frequência de loop deve preservar unidade como aparece (por exemplo 30s ou a cada 3 min). Meta diária: usar valor explícito; se não existir, dividir inserções do período pelo número de dias no histórico e arredondar. O resumo deve conter o nome do cliente e uma síntese fiel.`;
 
   let lastError: unknown;
-  for (const modelName of models) {
-    try {
-      const endpoint =
-        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { text: prompt },
-              { inlineData: { mimeType: "application/pdf", data: pdfBase64 } },
-            ],
-          }],
-          generationConfig: action === "summarize"
-            ? { maxOutputTokens: 1024 }
-            : {
-              responseMimeType: "application/json",
-              maxOutputTokens: 8192,
-            },
-        }),
-      });
-
-      const responseText = await response.text();
-      let payload: Record<string, unknown> = {};
+  for (let round = 1; round <= maxRetryRounds; round += 1) {
+    for (const modelName of models) {
       try {
-        payload = responseText ? JSON.parse(responseText) : {};
-      } catch {
-        payload = { error: responseText.slice(0, 1200) };
-      }
-      if (!response.ok) {
-        throw new GeminiRequestError(
-          `Gemini ${response.status} (${modelName}): ${JSON.stringify(payload).slice(0, 1200)}`,
-          response.status,
-          true
+        const endpoint =
+          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: prompt },
+                { inlineData: { mimeType: "application/pdf", data: pdfBase64 } },
+              ],
+            }],
+            generationConfig: action === "summarize"
+              ? { maxOutputTokens: 1024 }
+              : {
+                responseMimeType: "application/json",
+                maxOutputTokens: 8192,
+              },
+          }),
+        });
+
+        const responseText = await response.text();
+        let payload: Record<string, unknown> = {};
+        try {
+          payload = responseText ? JSON.parse(responseText) : {};
+        } catch {
+          payload = { error: responseText.slice(0, 1200) };
+        }
+        if (!response.ok) {
+          throw new GeminiRequestError(
+            `Gemini ${response.status} (${modelName}): ${JSON.stringify(payload).slice(0, 1200)}`,
+            response.status,
+            true
+          );
+        }
+
+        const candidates = payload.candidates as
+          | Array<{ content?: { parts?: Array<{ text?: string }> } }>
+          | undefined;
+        const text = candidates?.[0]?.content?.parts
+          ?.map((part) => part.text || "")
+          .join("")
+          .trim();
+        if (!text) throw new Error(`Gemini não retornou conteúdo para ${modelName}.`);
+
+        const result = action === "summarize" ? text : parseGeminiJson(text);
+        console.log(`Gemini respondeu usando ${modelName} na rodada ${round}.`);
+        return result;
+      } catch (error) {
+        lastError = error;
+        console.warn(
+          `Falha no modelo ${modelName} (rodada ${round}/${maxRetryRounds}). Tentando o próximo modelo.`
         );
       }
+    }
 
-      const candidates = payload.candidates as
-        | Array<{ content?: { parts?: Array<{ text?: string }> } }>
-        | undefined;
-      const text = candidates?.[0]?.content?.parts
-        ?.map((part) => part.text || "")
-        .join("")
-        .trim();
-      if (!text) throw new Error(`Gemini não retornou conteúdo para ${modelName}.`);
-
-      const result = action === "summarize" ? text : parseGeminiJson(text);
-      console.log(`Gemini respondeu usando ${modelName}.`);
-      return result;
-    } catch (error) {
-      lastError = error;
-      console.warn("Falha no modelo: " + modelName + ". Tentando o próximo...");
+    if (round < maxRetryRounds) {
+      console.warn(
+        `Todos os modelos falharam na rodada ${round}; nova tentativa em ${retryDelayMs} ms.`
+      );
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }
 
