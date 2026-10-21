@@ -2,7 +2,7 @@ import { requireAdmin } from "../_shared/admin.ts";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
-const models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b"];
+const models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"];
 
 class GeminiJsonParseError extends Error {}
 

@@ -3,7 +3,7 @@ import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 
 const keyName = "gemini_api_key";
 const geminiEndpoint =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent";
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
