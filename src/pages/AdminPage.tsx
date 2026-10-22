@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
 import {
   fetchEstado,
-  fetchGeminiKeyStatus,
+  fetchGroqKeyStatus,
   generatePdfReportSummary,
   importPdfReport,
   savePdfReport,
@@ -15,11 +15,11 @@ import {
   saveCampanha,
   saveRelatorios,
   saveTela,
-  testGeminiConnection,
+  testGroqConnection,
   uploadClientMedia,
   uploadWhiteVisionLogo,
   updateClientMedia,
-  updateGeminiApiKey,
+  updateGroqApiKey,
   uploadClientThemeLogo,
   PdfImportError,
 } from "../lib/supabaseAdminApi";
@@ -72,13 +72,13 @@ export function AdminPage() {
     clientName: string;
     clientPath: string;
   } | null>(null);
-  const [geminiApiKey, setGeminiApiKey] = useState("");
-  const [geminiKeyStatus, setGeminiKeyStatus] = useState<
-    "ambiente" | "memoria" | "ausente" | "indisponivel"
+  const [groqApiKey, setGroqApiKey] = useState("");
+  const [groqKeyStatus, setGroqKeyStatus] = useState<
+    "ambiente" | "portal" | "ausente" | "indisponivel"
   >("ausente");
-  const [geminiStatusError, setGeminiStatusError] = useState<string | null>(null);
-  const [savingGeminiKey, setSavingGeminiKey] = useState(false);
-  const [testingGemini, setTestingGemini] = useState(false);
+  const [groqStatusError, setGroqStatusError] = useState<string | null>(null);
+  const [savingGroqKey, setSavingGroqKey] = useState(false);
+  const [testingGroq, setTestingGroq] = useState(false);
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [savingLogo, setSavingLogo] = useState(false);
   const [uploadingThemeLogo, setUploadingThemeLogo] = useState(false);
@@ -103,7 +103,7 @@ export function AdminPage() {
     try {
       const [payload, keyConfig] = await Promise.all([
         fetchEstado(),
-        fetchGeminiKeyStatus().then(
+        fetchGroqKeyStatus().then(
           (result) => ({ result, error: null }),
           (statusError: unknown) => ({
             result: null,
@@ -119,12 +119,12 @@ export function AdminPage() {
       setMediaCampaignId(payload.db.campanhas[0]?.id || "");
       setPdfClientId(payload.db.campanhas[0]?.id || "");
       if (keyConfig.result) {
-        setGeminiKeyStatus(keyConfig.result.status);
-        setGeminiStatusError(null);
+        setGroqKeyStatus(keyConfig.result.status);
+        setGroqStatusError(null);
       } else {
-        setGeminiKeyStatus("indisponivel");
-        setGeminiStatusError(
-          `Não foi possível consultar a configuração Gemini: ${keyConfig.error}. Implante a Edge Function "gemini-admin" para habilitar essas operações.`
+        setGroqKeyStatus("indisponivel");
+        setGroqStatusError(
+          `Não foi possível consultar a configuração Groq: ${keyConfig.error}. Implante a Edge Function "groq-admin" para habilitar essas operações.`
         );
       }
     } catch (err) {
@@ -557,32 +557,32 @@ export function AdminPage() {
     }
   };
 
-  const handleSaveGeminiKey = async (event: React.FormEvent) => {
+  const handleSaveGroqKey = async (event: React.FormEvent) => {
     event.preventDefault();
-    setSavingGeminiKey(true);
+    setSavingGroqKey(true);
     setError(null);
     try {
-      const result = await updateGeminiApiKey(geminiApiKey);
-      setGeminiKeyStatus(result.status);
-      setGeminiApiKey("");
-      flash("Chave Gemini atualizada somente na memória do servidor.");
+      const result = await updateGroqApiKey(groqApiKey);
+      setGroqKeyStatus(result.status);
+      setGroqApiKey("");
+      flash("Chave Groq atualizada no armazenamento privado do servidor.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setSavingGeminiKey(false);
+      setSavingGroqKey(false);
     }
   };
 
-  const handleTestGemini = async () => {
-    setTestingGemini(true);
+  const handleTestGroq = async () => {
+    setTestingGroq(true);
     setError(null);
     try {
-      await testGeminiConnection();
-      flash("Conexão com a API Gemini verificada com sucesso.");
+      await testGroqConnection();
+      flash("Conexão com a API Groq verificada com sucesso.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setTestingGemini(false);
+      setTestingGroq(false);
     }
   };
 
@@ -815,73 +815,74 @@ export function AdminPage() {
 
         <section className="rounded-2xl border border-violet-500/30 bg-slate-900/80 p-5 space-y-4">
           <div>
-            <h2 className="text-lg font-bold text-white">Configuração da chave Gemini</h2>
+            <h2 className="text-lg font-bold text-white">Configuração da chave Groq</h2>
             <p className="text-sm text-slate-400">
               Status:{" "}
               <span
                 className={
-                  geminiKeyStatus === "ausente" || geminiKeyStatus === "indisponivel"
+                  groqKeyStatus === "ausente" || groqKeyStatus === "indisponivel"
                     ? "text-amber-300"
                     : "text-emerald-300"
                 }
               >
-                {geminiKeyStatus === "ambiente"
-                  ? "configurada no .env do servidor"
-                  : geminiKeyStatus === "memoria"
-                    ? "configurada em memória até reiniciar o servidor"
-                    : geminiKeyStatus === "indisponivel"
-                      ? "Edge Function gemini-admin indisponível"
+                {groqKeyStatus === "ambiente"
+                  ? "configurada como secret no Supabase"
+                  : groqKeyStatus === "portal"
+                    ? "configurada pelo portal administrativo"
+                    : groqKeyStatus === "indisponivel"
+                      ? "Edge Function groq-admin indisponível"
                       : "não configurada"}
               </span>
             </p>
-            {geminiStatusError && (
+            {groqStatusError && (
               <p role="status" className="mt-2 text-sm text-amber-200">
-                {geminiStatusError}
+                {groqStatusError}
               </p>
             )}
           </div>
-          <form onSubmit={handleSaveGeminiKey} className="flex flex-col sm:flex-row sm:items-end gap-3">
+          <form onSubmit={handleSaveGroqKey} className="flex flex-col sm:flex-row sm:items-end gap-3">
             <label className="text-sm space-y-1 flex-1">
-              <span className="text-slate-300">Colar ou substituir chave de API</span>
+              <span className="text-slate-300">Colar ou substituir chave da API Groq</span>
               <input
                 required
                 type="password"
                 autoComplete="new-password"
-                value={geminiApiKey}
-                onChange={(event) => setGeminiApiKey(event.target.value)}
+                value={groqApiKey}
+                onChange={(event) => setGroqApiKey(event.target.value)}
                 className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
-                placeholder="A chave será enviada apenas ao backend"
+                placeholder="A chave é enviada ao backend administrativo"
               />
             </label>
             <button
               type="submit"
-              disabled={savingGeminiKey || geminiApiKey.trim().length < 20}
+              disabled={savingGroqKey || groqApiKey.trim().length < 20}
               className="rounded-xl bg-violet-400 hover:bg-violet-300 text-slate-950 font-bold px-4 py-2.5 disabled:opacity-60"
             >
-              {savingGeminiKey ? "Configurando..." : "Configurar chave"}
+              {savingGroqKey ? "Configurando..." : "Configurar chave"}
             </button>
           </form>
           <button
             type="button"
-            onClick={() => void handleTestGemini()}
+            onClick={() => void handleTestGroq()}
             disabled={
-              testingGemini ||
-              geminiKeyStatus === "ausente" ||
-              geminiKeyStatus === "indisponivel"
+              testingGroq ||
+              groqKeyStatus === "ausente" ||
+              groqKeyStatus === "indisponivel"
             }
             className="rounded-xl border border-violet-400/50 px-4 py-2.5 text-sm font-semibold text-violet-200 disabled:opacity-60"
           >
-            {testingGemini ? "Testando conexão..." : "Testar conexão com Gemini"}
+            {testingGroq ? "Testando conexão..." : "Testar conexão com Groq"}
           </button>
           <p className="text-xs text-slate-500">
-            A chave nunca é devolvida ao navegador nem salva no banco. A configuração feita aqui
-            permanece apenas na memória do processo; use o .env privado para persistir entre reinícios.
+            A chave nunca é devolvida ao navegador. Ela é guardada em private_settings, tabela acessível
+            somente pelo backend com service role. Também é possível configurar GROQ_API_KEY como secret
+            da Edge Function no Supabase.
           </p>
         </section>
 
         <section className="rounded-2xl border border-emerald-500/30 bg-slate-900/80 p-5 space-y-4">
           <div>
-            <h2 className="text-lg font-bold text-white">Importar relatório PDF com Gemini</h2>
+            <h2 className="text-lg font-bold text-white">Importar relatório PDF com Groq</h2>
             <p className="text-sm text-slate-400">
               Analise o PDF e confira os dados extraídos. Depois salve o arquivo no histórico,
               gere o resumo da IA e confirme a gravação dos dados no perfil do cliente.
@@ -1104,7 +1105,7 @@ export function AdminPage() {
         <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
-              <h2 className="text-lg font-bold text-white">Assistente de relatórios Gemini</h2>
+              <h2 className="text-lg font-bold text-white">Assistente de relatórios Groq</h2>
               <p className="text-sm text-slate-400">Gera um resumo usando os dados atuais do relatório.</p>
             </div>
             <button

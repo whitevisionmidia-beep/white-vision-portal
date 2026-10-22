@@ -3,5 +3,8 @@ project_id = "dfyzynhymcwaousvtzkp"
 [functions.gemini-admin]
 verify_jwt = true
 
+[functions.groq-admin]
+verify_jwt = true
+
 [functions.analyze-pdf]
 verify_jwt = true

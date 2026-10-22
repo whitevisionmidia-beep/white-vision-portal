@@ -175,24 +175,24 @@ export async function fetchEstado(): Promise<{ db: WhiteVisionDb }> {
   return asDb(await snapshot());
 }
 
-export type GeminiKeyStatus = "ambiente" | "memoria" | "ausente" | "indisponivel";
+export type GroqKeyStatus = "ambiente" | "portal" | "ausente" | "indisponivel";
 
-async function invokeGeminiAdmin<T>(body: Row): Promise<T> {
-  const { data, error } = await getSupabase().functions.invoke("gemini-admin", { body });
+async function invokeGroqAdmin<T>(body: Row): Promise<T> {
+  const { data, error } = await getSupabase().functions.invoke("groq-admin", { body });
   if (error) throw new Error(error.message);
   return data as T;
 }
 
-export function fetchGeminiKeyStatus(): Promise<{ status: GeminiKeyStatus }> {
-  return invokeGeminiAdmin({ action: "status" });
+export function fetchGroqKeyStatus(): Promise<{ status: GroqKeyStatus }> {
+  return invokeGroqAdmin({ action: "status" });
 }
 
-export function updateGeminiApiKey(apiKey: string): Promise<{ status: GeminiKeyStatus }> {
-  return invokeGeminiAdmin({ action: "set-key", apiKey });
+export function updateGroqApiKey(apiKey: string): Promise<{ status: GroqKeyStatus }> {
+  return invokeGroqAdmin({ action: "set-key", apiKey });
 }
 
-export function testGeminiConnection(): Promise<{ connected: boolean }> {
-  return invokeGeminiAdmin({ action: "test" });
+export function testGroqConnection(): Promise<{ connected: boolean }> {
+  return invokeGroqAdmin({ action: "test" });
 }
 
 async function convertImageToPng(file: File): Promise<Blob> {
