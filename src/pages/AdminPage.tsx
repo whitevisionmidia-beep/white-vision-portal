@@ -38,6 +38,7 @@ import { DEFAULT_CLIENT_THEME } from "../types/whiteVision";
 import { getPublicMediaUrl } from "../lib/supabase";
 
 function formatDia(isoDate: string): string {
+  if (!isoDate || !isoDate.includes("-")) return isoDate || "";
   const [year, month, day] = isoDate.split("-");
   return `${day}/${month}/${year}`;
 }
@@ -107,6 +108,95 @@ export function AdminPage() {
   } | null>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
 
+  const applyDb = (next: WhiteVisionDb) => {
+    setDb(next);
+    setCampanhaDraft((current) =>
+      next.campanhas.find((campaign) => campaign.id === current?.id) ||
+      next.campanhas[0] ||
+      null
+    );
+    setTelasDraft(next.telas);
+    setRelatoriosDraft(next.relatoriosDiarios);
+    setVideos(next.videos);
+    if (!next.campanhas.some((campaign) => campaign.id === mediaCampaignId)) {
+      setMediaCampaignId(next.campanhas[0]?.id || "");
+    }
+    if (!next.campanhas.some((campaign) => campaign.id === pdfClientId)) {
+      setPdfClientId(next.campanhas[0]?.id || "");
+    }
+    if (editingMediaId && !next.videos.some((item) => item.id === editingMediaId)) {
+      setEditingMediaId(null);
+      setMediaTitle("");
+      setMediaDescription("");
+      setMediaFile(null);
+    }
+  };
+
+  const selectClientForAdmin = async (campaignId: string) => {
+    setPdfClientId(campaignId);
+    setMediaCampaignId(campaignId);
+    if (!campaignId) {
+      setCampanhaDraft(null);
+      setTelasDraft([]);
+      setRelatoriosDraft([]);
+      return;
+    }
+    const requestId = ++clientSelectionRequest.current;
+    setLoadingClientData(true);
+    setError(null);
+    try {
+      const clientData = await fetchClientAdminData(campaignId);
+      if (requestId !== clientSelectionRequest.current) return;
+
+      setCampanhaDraft(clientData.campanha);
+
+      setDb((previous) => {
+        if (!previous) return previous;
+        const otherPontos = previous.pontos.filter((point) => point.campanhaId !== campaignId);
+        const clientPointIds = new Set(clientData.pontos.map((point) => point.id));
+        const otherTelas = previous.telas.filter((screen) => !clientPointIds.has(screen.pontoId));
+        const clientScreenIds = new Set(clientData.telas.map((screen) => screen.id));
+        const otherRelatorios = previous.relatoriosDiarios.filter((report) => !clientScreenIds.has(report.telaId));
+        const otherPdfs = previous.relatoriosPdf.filter((report) => report.campanhaId !== campaignId);
+
+        return {
+          ...previous,
+          campanhas: previous.campanhas.map((campaign) =>
+            campaign.id === campaignId ? clientData.campanha : campaign
+          ),
+          pontos: [...otherPontos, ...clientData.pontos],
+          telas: [...otherTelas, ...clientData.telas],
+          relatoriosDiarios: [...otherRelatorios, ...clientData.relatoriosDiarios],
+          relatoriosPdf: [...otherPdfs, ...clientData.relatoriosPdf],
+        };
+      });
+
+      setTelasDraft((previous) => {
+        const clientPointIds = new Set(clientData.pontos.map((point) => point.id));
+        return [
+          ...previous.filter((screen) => !clientPointIds.has(screen.pontoId)),
+          ...clientData.telas,
+        ];
+      });
+
+      setRelatoriosDraft((previous) => {
+        const clientScreenIds = new Set(clientData.telas.map((screen) => screen.id));
+        return [
+          ...previous.filter((report) => !clientScreenIds.has(report.telaId)),
+          ...clientData.relatoriosDiarios,
+        ];
+      });
+    } catch (err) {
+      if (requestId === clientSelectionRequest.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (requestId === clientSelectionRequest.current) {
+        setLoadingClientData(false);
+      }
+    }
+  };
+
   const load = async () => {
     setLoading(true);
     setError(null);
@@ -122,12 +212,19 @@ export function AdminPage() {
         ),
       ]);
       setDb(payload.db);
-      setCampanhaDraft(payload.db.campanhas[0] || null);
-      setTelasDraft(payload.db.telas);
-      setRelatoriosDraft(payload.db.relatoriosDiarios);
       setVideos(payload.db.videos);
-      setMediaCampaignId(payload.db.campanhas[0]?.id || "");
-      setPdfClientId(payload.db.campanhas[0]?.id || "");
+
+      const firstCampaign = payload.db.campanhas[0] || null;
+      if (firstCampaign) {
+        setPdfClientId(firstCampaign.id);
+        setMediaCampaignId(firstCampaign.id);
+        await selectClientForAdmin(firstCampaign.id);
+      } else {
+        setCampanhaDraft(null);
+        setTelasDraft(payload.db.telas);
+        setRelatoriosDraft(payload.db.relatoriosDiarios);
+      }
+
       if (keyConfig.result) {
         setGroqKeyStatus(keyConfig.result.status);
         setGroqStatusError(null);
@@ -155,20 +252,24 @@ export function AdminPage() {
           .filter((ponto) => ponto.campanhaId === campanhaDraft?.id)
           .map((ponto) => ponto.id) || []
       ),
-    [db, campanhaDraft?.id]
+    [db?.pontos, campanhaDraft?.id]
   );
+
   const telasDaCampanha = useMemo(
     () => telasDraft.filter((tela) => pontoIdsDaCampanha.has(tela.pontoId)),
     [telasDraft, pontoIdsDaCampanha]
   );
+
   const telaIdsDaCampanha = useMemo(
     () => new Set(telasDaCampanha.map((tela) => tela.id)),
     [telasDaCampanha]
   );
+
   const relatoriosDaCampanha = useMemo(
     () => relatoriosDraft.filter((item) => telaIdsDaCampanha.has(item.telaId)),
     [relatoriosDraft, telaIdsDaCampanha]
   );
+
   const datas = useMemo(
     () => [
       ...new Set([
@@ -178,104 +279,6 @@ export function AdminPage() {
     ].sort(),
     [relatoriosDaCampanha, campanhaDraft?.metricasDashboard?.historicoDiario]
   );
-
-  const applyDb = (next: WhiteVisionDb) => {
-    setDb(next);
-    setCampanhaDraft(
-      next.campanhas.find((campaign) => campaign.id === campanhaDraft?.id) ||
-        next.campanhas[0] ||
-        null
-    );
-    setTelasDraft(next.telas);
-    setRelatoriosDraft(next.relatoriosDiarios);
-    setVideos(next.videos);
-    if (!next.campanhas.some((campaign) => campaign.id === mediaCampaignId)) {
-      setMediaCampaignId(next.campanhas[0]?.id || "");
-    }
-    if (!next.campanhas.some((campaign) => campaign.id === pdfClientId)) {
-      setPdfClientId(next.campanhas[0]?.id || "");
-    }
-    if (editingMediaId && !next.videos.some((item) => item.id === editingMediaId)) {
-      setEditingMediaId(null);
-      setMediaTitle("");
-      setMediaDescription("");
-      setMediaFile(null);
-    }
-  };
-
-  const selectClientForAdmin = async (campaignId: string) => {
-    setPdfClientId(campaignId);
-    if (!campaignId) {
-      setCampanhaDraft(null);
-      setTelasDraft([]);
-      setRelatoriosDraft([]);
-      return;
-    }
-    const requestId = ++clientSelectionRequest.current;
-    setLoadingClientData(true);
-    setError(null);
-    try {
-      const clientData = await fetchClientAdminData(campaignId);
-      if (requestId !== clientSelectionRequest.current) return;
-      setCampanhaDraft(clientData.campanha);
-      setTelasDraft((previous) => [
-        ...previous.filter((screen) =>
-          !db?.pontos.some((point) => point.campanhaId === campaignId && point.id === screen.pontoId)
-        ),
-        ...clientData.telas,
-      ]);
-      const previousScreenIds = new Set(
-        db?.telas
-          .filter((screen) => db.pontos.some(
-            (point) => point.campanhaId === campaignId && point.id === screen.pontoId
-          ))
-          .map((screen) => screen.id) || []
-      );
-      setRelatoriosDraft((previous) => [
-        ...previous.filter((report) => !previousScreenIds.has(report.telaId)),
-        ...clientData.relatoriosDiarios,
-      ]);
-      setDb((previous) => {
-        if (!previous) return previous;
-        const currentPointIds = new Set(
-          previous.pontos
-            .filter((point) => point.campanhaId === campaignId)
-            .map((point) => point.id)
-        );
-        const currentScreenIds = new Set(
-          previous.telas.filter((screen) => currentPointIds.has(screen.pontoId)).map((screen) => screen.id)
-        );
-        return {
-          ...previous,
-          campanhas: previous.campanhas.map((campaign) =>
-            campaign.id === campaignId ? clientData.campanha : campaign
-          ),
-          pontos: [
-            ...previous.pontos.filter((point) => point.campanhaId !== campaignId),
-            ...clientData.pontos,
-          ],
-          telas: [
-            ...previous.telas.filter((screen) => !currentPointIds.has(screen.pontoId)),
-            ...clientData.telas,
-          ],
-          relatoriosDiarios: [
-            ...previous.relatoriosDiarios.filter((report) => !currentScreenIds.has(report.telaId)),
-            ...clientData.relatoriosDiarios,
-          ],
-          relatoriosPdf: [
-            ...previous.relatoriosPdf.filter((report) => report.campanhaId !== campaignId),
-            ...clientData.relatoriosPdf,
-          ],
-        };
-      });
-    } catch (err) {
-      if (requestId === clientSelectionRequest.current) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    } finally {
-      if (requestId === clientSelectionRequest.current) setLoadingClientData(false);
-    }
-  };
 
   const flash = (text: string) => {
     setMessage(text);
@@ -312,7 +315,9 @@ export function AdminPage() {
         clientTheme: { ...DEFAULT_CLIENT_THEME, ...campanhaDraft.clientTheme },
       });
       applyDb(payload.db);
-      flash("Status da campanha salvo.");
+      const refreshedClient = await fetchClientAdminData(campanhaDraft.id);
+      setCampanhaDraft(refreshedClient.campanha);
+      flash("Perfil e configurações da campanha salvos no Supabase.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -322,19 +327,32 @@ export function AdminPage() {
 
   const handleSaveMetas = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (!campanhaDraft) {
+      setError("Selecione um cliente antes de salvar as metas.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
       let nextDb: WhiteVisionDb | null = null;
       for (const tela of telasDaCampanha) {
         const payload = await saveTela(tela.id, {
-          metaDiaria: tela.metaDiaria,
+          metaDiaria: tela.metaDiaria !== null && tela.metaDiaria !== undefined ? Number(tela.metaDiaria) : null,
           status: tela.status,
         });
         nextDb = payload.db;
       }
       if (nextDb) applyDb(nextDb);
-      flash("Metas diárias das telas salvas.");
+      const refreshedClient = await fetchClientAdminData(campanhaDraft.id);
+      setCampanhaDraft(refreshedClient.campanha);
+      setTelasDraft((previous) => {
+        const clientScreenIds = new Set(refreshedClient.telas.map((t) => t.id));
+        return [
+          ...previous.filter((t) => !clientScreenIds.has(t.id)),
+          ...refreshedClient.telas,
+        ];
+      });
+      flash("Metas diárias das telas salvas no Supabase.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -348,19 +366,37 @@ export function AdminPage() {
       setError("Selecione um cliente antes de salvar os relatórios diários.");
       return;
     }
+    if (telasDaCampanha.length === 0) {
+      setError("Este cliente ainda não possui telas cadastradas para associar relatórios.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      const payload = await saveRelatorios(
-        campanhaDraft.id,
-        relatoriosDaCampanha.map((item) => ({
-          ...item,
-          exibicoesEntregues: Number(item.exibicoesEntregues),
-          falhaNominal: Boolean(item.falhaNominal),
-        }))
-      );
+      const recordsToSave: RelatorioDiarioTela[] = relatoriosDaCampanha.map((item) => ({
+        id: item.id || crypto.randomUUID(),
+        data: item.data,
+        telaId: item.telaId,
+        exibicoesEntregues: Number(item.exibicoesEntregues) || 0,
+        metaDiaria: item.metaDiaria !== null && item.metaDiaria !== undefined ? Number(item.metaDiaria) : null,
+        falhaNominal: Boolean(item.falhaNominal),
+        statusRelatorio: item.statusRelatorio || "desconhecido",
+        observacaoFalha: item.observacaoFalha || "",
+      }));
+
+      const payload = await saveRelatorios(campanhaDraft.id, recordsToSave);
       applyDb(payload.db);
-      flash("Relatórios diários salvos.");
+
+      const refreshedClient = await fetchClientAdminData(campanhaDraft.id);
+      setCampanhaDraft(refreshedClient.campanha);
+      setRelatoriosDraft((previous) => {
+        const clientScreenIds = new Set(refreshedClient.telas.map((t) => t.id));
+        return [
+          ...previous.filter((r) => !clientScreenIds.has(r.telaId)),
+          ...refreshedClient.relatoriosDiarios,
+        ];
+      });
+      flash("Relatórios diários salvos no Supabase com sucesso.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -390,7 +426,7 @@ export function AdminPage() {
         .filter((item) => item.data === newReportDate)
         .map((item) => item.telaId)
     );
-    const newRows = telasDaCampanha
+    const newRows: RelatorioDiarioTela[] = telasDaCampanha
       .filter((screen) => !existing.has(screen.id))
       .map((screen) => ({
         id: crypto.randomUUID(),
@@ -399,19 +435,23 @@ export function AdminPage() {
         exibicoesEntregues: 0,
         metaDiaria: screen.metaDiaria,
         falhaNominal: false,
-        statusRelatorio: "desconhecido" as const,
+        statusRelatorio: "desconhecido",
         observacaoFalha: "",
       }));
+
     if (!newRows.length) {
       setError("Já existem registros para todas as telas nesta data.");
       return;
     }
     setError(null);
     setRelatoriosDraft((previous) => [...previous, ...newRows]);
+    flash(`Data ${formatDia(newReportDate)} adicionada para as telas. Clique em Salvar para persistir.`);
   };
 
   const handleDeleteDailyReport = async (report: RelatorioDiarioTela) => {
     if (!window.confirm(`Excluir o registro diário de ${formatDia(report.data)} desta tela?`)) return;
+    if (!campanhaDraft) return;
+
     if (!db?.relatoriosDiarios.some((item) => item.id === report.id)) {
       setRelatoriosDraft((previous) => previous.filter((item) => item.id !== report.id));
       return;
@@ -419,11 +459,10 @@ export function AdminPage() {
     setDeletingDailyReport(true);
     setError(null);
     try {
-      if (!campanhaDraft) return;
       const payload = await deleteRelatorioDiario(campanhaDraft.id, report.id);
       setDb(payload.db);
       setRelatoriosDraft((previous) => previous.filter((item) => item.id !== report.id));
-      flash("Registro diário excluído.");
+      flash("Registro diário excluído do Supabase.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -445,9 +484,8 @@ export function AdminPage() {
       setClientCampaignDraft("");
       const createdClient = payload.db.campanhas[payload.db.campanhas.length - 1];
       if (createdClient) {
-        setMediaCampaignId(createdClient.id);
         await selectClientForAdmin(createdClient.id);
-        flash("Cliente cadastrado, selecionado e histórico carregado.");
+        flash("Cliente cadastrado e histórico carregado do Supabase.");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -467,13 +505,14 @@ export function AdminPage() {
       });
       const createdClient = payload.db.campanhas[payload.db.campanhas.length - 1];
       applyDb(payload.db);
-      setMediaCampaignId(createdClient.id);
-      await selectClientForAdmin(createdClient.id);
+      if (createdClient) {
+        await selectClientForAdmin(createdClient.id);
+      }
       setImportedReport(null);
       setPdfClientNameDraft("");
       setPdfCampaignNameDraft("");
       setShowPdfClientForm(false);
-      flash(`Cliente ${createdClient.clienteNome} cadastrado e selecionado para o relatório.`);
+      flash(`Cliente ${createdClient?.clienteNome || ""} cadastrado e selecionado para o relatório.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -497,18 +536,18 @@ export function AdminPage() {
       let payload;
       if (editingMediaId) {
         payload = await updateClientMedia(editingMediaId, {
-            campanhaId: mediaCampaignId,
-            titulo: mediaTitle,
-            descricao: mediaDescription,
+          campanhaId: mediaCampaignId,
+          titulo: mediaTitle,
+          descricao: mediaDescription,
         });
       } else {
         if (!mediaFile) throw new Error("Selecione o arquivo que deseja enviar.");
         payload = await uploadClientMedia(
-            mediaCampaignId,
-            mediaFile,
-            mediaTitle.trim() || mediaFile.name,
-            mediaDescription
-          );
+          mediaCampaignId,
+          mediaFile,
+          mediaTitle.trim() || mediaFile.name,
+          mediaDescription
+        );
       }
       applyDb(payload.db);
       setEditingMediaId(null);
@@ -600,10 +639,7 @@ export function AdminPage() {
     try {
       const result = await importPdfReport(reportPdf, pdfClientId);
       applyDb(result.db);
-      setCampanhaDraft(
-        result.db.campanhas.find((campaign) => campaign.id === result.campaignId) || null
-      );
-      setPdfClientId(result.campaignId);
+      await selectClientForAdmin(result.campaignId);
       setImportedReport({
         uploadId: result.uploadId,
         clientPath: result.clientPath,
@@ -617,21 +653,21 @@ export function AdminPage() {
       });
       setReportPdf(null);
       if (pdfInputRef.current) pdfInputRef.current.value = "";
-      flash(`Relatório processado e dados salvos com sucesso para o cliente ${result.clientName}!`);
+      flash(`Relatório processado e salvo com sucesso no Supabase para ${result.clientName}!`);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof PdfImportError && err.pdfSaved) {
         try {
           const latest = await fetchEstado();
           applyDb(latest.db);
-          setError(`${message} O arquivo permanece salvo e aparece na lista de PDFs enviados.`);
+          setError(`${msg} O arquivo permanece salvo e aparece na lista de PDFs enviados.`);
         } catch (refreshError) {
           const refreshMessage =
             refreshError instanceof Error ? refreshError.message : String(refreshError);
-          setError(`${message} O PDF foi salvo, mas não foi possível atualizar a lista: ${refreshMessage}`);
+          setError(`${msg} O PDF foi salvo, mas não foi possível atualizar a lista: ${refreshMessage}`);
         }
       } else {
-        setError(message);
+        setError(msg);
       }
     } finally {
       setImportingPdf(false);
@@ -672,8 +708,11 @@ export function AdminPage() {
     try {
       const result = await savePdfReportToClient(uploadId);
       applyDb(result.db);
+      if (campanhaDraft?.id) {
+        await selectClientForAdmin(campanhaDraft.id);
+      }
       setProfileSavedLink({ clientName: result.clientName, clientPath: result.clientPath });
-      flash(`Relatório processado e dados salvos com sucesso para o cliente ${result.clientName}!`);
+      flash(`Relatório processado e dados salvos no perfil de ${result.clientName}!`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -779,7 +818,7 @@ export function AdminPage() {
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-200 flex items-center justify-center">
-        Carregando painel administrativo...
+        Carregando painel administrativo e histórico do Supabase...
       </div>
     );
   }
@@ -787,7 +826,7 @@ export function AdminPage() {
   if (!db) {
     return (
       <div className="min-h-screen bg-slate-950 text-rose-300 flex items-center justify-center p-6">
-        {error || "Não foi possível carregar o banco local."}
+        {error || "Não foi possível carregar os dados do servidor."}
       </div>
     );
   }
@@ -811,7 +850,7 @@ export function AdminPage() {
               <p translate="no" className="text-xs uppercase tracking-wider text-emerald-400 font-bold">
                 White Vision
               </p>
-            <h1 className="text-2xl font-extrabold text-white">Painel Administrativo</h1>
+              <h1 className="text-2xl font-extrabold text-white">Painel Administrativo</h1>
             </div>
           </div>
           <a
@@ -839,7 +878,7 @@ export function AdminPage() {
           <div>
             <h2 className="text-lg font-bold text-white">Gestão de clientes e links exclusivos</h2>
             <p className="text-sm text-slate-400">
-              Cada cliente recebe um endereço aleatório que permite acessar somente os seus dados e arquivos.
+              Cada cliente recebe um endereço exclusivo no portal para acessar somente os seus dados e arquivos.
             </p>
           </div>
           <form onSubmit={handleCreateClient} className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -895,6 +934,13 @@ export function AdminPage() {
                 <div className="flex shrink-0 flex-wrap gap-2">
                   <button
                     type="button"
+                    onClick={() => void selectClientForAdmin(campaign.id)}
+                    className="self-start rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800"
+                  >
+                    Gerenciar cliente
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void handleCopyClientLink(campaign.slug)}
                     className="self-start rounded-lg border border-sky-500/40 px-3 py-1.5 text-sm text-sky-200 hover:bg-sky-500/10"
                   >
@@ -918,7 +964,7 @@ export function AdminPage() {
           <div>
             <h2 className="text-lg font-bold text-white">Logo White Vision</h2>
             <p className="text-sm text-slate-400">
-              Envie PNG, JPEG/JPG, WEBP ou SVG de até 5 MB. A imagem é processada como PNG para compatibilidade.
+              Envie PNG, JPEG/JPG, WEBP ou SVG de até 5 MB. A imagem é atualizada para todos os acessos.
             </p>
           </div>
           <div className="inline-flex rounded-lg bg-slate-950 p-3">
@@ -1013,18 +1059,13 @@ export function AdminPage() {
           >
             {testingGroq ? "Testando conexão..." : "Testar conexão com Groq"}
           </button>
-          <p className="text-xs text-slate-500">
-            A chave nunca é devolvida ao navegador. Ela é guardada em private_settings, tabela acessível
-            somente pelo backend com service role. Também é possível configurar GROQ_API_KEY como secret
-            da Edge Function no Supabase.
-          </p>
         </section>
 
         <section className="rounded-2xl border border-emerald-500/30 bg-slate-900/80 p-5 space-y-4">
           <div>
             <h2 className="text-lg font-bold text-white">Importar relatório PDF com Groq</h2>
             <p className="text-sm text-slate-400">
-              A análise salva os dados extraídos, as metas por tela e o histórico diário no perfil e no histórico do PDF. Confira os campos e edite-os antes de salvar alterações.
+              A análise grava os dados extraídos, metas e relatórios diários diretamente no Supabase atrelados ao cliente.
             </p>
           </div>
           <label className="block text-sm space-y-1">
@@ -1120,9 +1161,11 @@ export function AdminPage() {
                 </div>
                 <div>
                   <dt className="text-xs text-slate-400">Meta diária (relatório)</dt>
-                  <dd className="font-semibold">{importedReport.totals.metaDiaria > 0
-                    ? importedReport.totals.metaDiaria.toLocaleString("pt-BR")
-                    : "Não informada"}</dd>
+                  <dd className="font-semibold">
+                    {importedReport.totals.metaDiaria > 0
+                      ? importedReport.totals.metaDiaria.toLocaleString("pt-BR")
+                      : "Não informada"}
+                  </dd>
                 </div>
                 <div>
                   <dt className="text-xs text-slate-400">Dias acumulados</dt>
@@ -1287,7 +1330,7 @@ export function AdminPage() {
           <div>
             <h2 className="text-lg font-bold text-white">Upload de mídia por cliente</h2>
             <p className="text-sm text-slate-400">
-              Envie arquivos reais MP4, PNG ou JPG. Cada arquivo fica associado ao cliente selecionado.
+              Envie arquivos reais MP4, PNG ou JPG associados ao cliente selecionado.
             </p>
           </div>
           <form onSubmit={handleUploadMedia} className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1296,7 +1339,11 @@ export function AdminPage() {
               <select
                 required
                 value={mediaCampaignId}
-                onChange={(event) => setMediaCampaignId(event.target.value)}
+                onChange={(event) => {
+                  const targetId = event.target.value;
+                  setMediaCampaignId(targetId);
+                  void selectClientForAdmin(targetId);
+                }}
                 className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
               >
                 <option value="" disabled>Selecione um cliente</option>
@@ -1437,487 +1484,524 @@ export function AdminPage() {
         </section>
 
         {campanhaDraft && (
-        <>
-        <form
-          onSubmit={handleSaveCampanha}
-          className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-4"
-        >
-          <h2 className="text-lg font-bold text-white">Configurações do perfil do cliente</h2>
-          <label className="block max-w-xl space-y-1 text-sm">
-            <span className="text-slate-400">Cliente / campanha</span>
-            <select
-              value={campanhaDraft.id}
-              onChange={(event) => void selectClientForAdmin(event.target.value)}
-              disabled={loadingClientData}
-              className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
+          <>
+            <form
+              onSubmit={handleSaveCampanha}
+              className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-4"
             >
-              {db.campanhas.map((campaign) => (
-                <option key={campaign.id} value={campaign.id}>
-                  {campaign.clienteNome} — {campaign.campanhaNome}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">Nome do cliente</span>
-              <input
-                required
-                maxLength={120}
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
-                value={campanhaDraft.clienteNome}
-                onChange={(event) =>
-                  setCampanhaDraft({ ...campanhaDraft, clienteNome: event.target.value })
-                }
-              />
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">Campanha</span>
-              <input
-                required
-                maxLength={120}
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
-                value={campanhaDraft.campanhaNome}
-                onChange={(event) =>
-                  setCampanhaDraft({ ...campanhaDraft, campanhaNome: event.target.value })
-                }
-              />
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">Status</span>
-              <select
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
-                value={campanhaDraft.status}
-                onChange={(event) =>
-                  setCampanhaDraft({
-                    ...campanhaDraft,
-                    status: event.target.value as StatusCampanha,
-                  })
-                }
+              <h2 className="text-lg font-bold text-white">Configurações do perfil do cliente</h2>
+              <label className="block max-w-xl space-y-1 text-sm">
+                <span className="text-slate-400">Cliente / campanha ativa</span>
+                <select
+                  value={campanhaDraft.id}
+                  onChange={(event) => void selectClientForAdmin(event.target.value)}
+                  disabled={loadingClientData}
+                  className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
+                >
+                  {db.campanhas.map((campaign) => (
+                    <option key={campaign.id} value={campaign.id}>
+                      {campaign.clienteNome} — {campaign.campanhaNome}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">Nome do cliente</span>
+                  <input
+                    required
+                    maxLength={120}
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
+                    value={campanhaDraft.clienteNome}
+                    onChange={(event) =>
+                      setCampanhaDraft({ ...campanhaDraft, clienteNome: event.target.value })
+                    }
+                  />
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">Campanha</span>
+                  <input
+                    required
+                    maxLength={120}
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
+                    value={campanhaDraft.campanhaNome}
+                    onChange={(event) =>
+                      setCampanhaDraft({ ...campanhaDraft, campanhaNome: event.target.value })
+                    }
+                  />
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">Status</span>
+                  <select
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
+                    value={campanhaDraft.status}
+                    onChange={(event) =>
+                      setCampanhaDraft({
+                        ...campanhaDraft,
+                        status: event.target.value as StatusCampanha,
+                      })
+                    }
+                  >
+                    <option value="ativa">Ativa</option>
+                    <option value="pausada">Pausada</option>
+                    <option value="encerrada">Encerrada</option>
+                  </select>
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">Dias acumulados</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    required
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
+                    value={campanhaDraft.diasAcumulados}
+                    onChange={(event) =>
+                      setCampanhaDraft({
+                        ...campanhaDraft,
+                        diasAcumulados: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">Total de exibições acumuladas</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    required
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
+                    value={campanhaDraft.totalExibicoesAcumuladas}
+                    onChange={(event) =>
+                      setCampanhaDraft({
+                        ...campanhaDraft,
+                        totalExibicoesAcumuladas: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">Período do relatório</span>
+                  <input
+                    required
+                    maxLength={200}
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
+                    value={campanhaDraft.periodo}
+                    onChange={(event) =>
+                      setCampanhaDraft({ ...campanhaDraft, periodo: event.target.value })
+                    }
+                  />
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">Cor da moldura da tela</span>
+                  <input
+                    type="color"
+                    value={campanhaDraft.clientTheme?.frameColor || DEFAULT_CLIENT_THEME.frameColor}
+                    onChange={(event) =>
+                      setCampanhaDraft({
+                        ...campanhaDraft,
+                        clientTheme: {
+                          ...DEFAULT_CLIENT_THEME,
+                          ...campanhaDraft.clientTheme,
+                          frameColor: event.target.value,
+                        },
+                      })
+                    }
+                    className="h-10 w-full rounded-lg bg-slate-950 border border-slate-700 p-1"
+                  />
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">Cor primária dos botões</span>
+                  <input
+                    type="color"
+                    value={campanhaDraft.clientTheme?.primaryColor || DEFAULT_CLIENT_THEME.primaryColor}
+                    onChange={(event) =>
+                      setCampanhaDraft({
+                        ...campanhaDraft,
+                        clientTheme: {
+                          ...DEFAULT_CLIENT_THEME,
+                          ...campanhaDraft.clientTheme,
+                          primaryColor: event.target.value,
+                        },
+                      })
+                    }
+                    className="h-10 w-full rounded-lg bg-slate-950 border border-slate-700 p-1"
+                  />
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">Cor do fundo da logo no totem</span>
+                  <input
+                    type="color"
+                    value={campanhaDraft.clientTheme?.logoBgColor || DEFAULT_CLIENT_THEME.logoBgColor}
+                    onChange={(event) =>
+                      setCampanhaDraft({
+                        ...campanhaDraft,
+                        clientTheme: {
+                          ...DEFAULT_CLIENT_THEME,
+                          ...campanhaDraft.clientTheme,
+                          logoBgColor: event.target.value,
+                        },
+                      })
+                    }
+                    className="h-10 w-full rounded-lg bg-slate-950 border border-slate-700 p-1"
+                  />
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">
+                    Tamanho da logo no totem: {campanhaDraft.clientTheme?.logoSize || DEFAULT_CLIENT_THEME.logoSize}px
+                  </span>
+                  <input
+                    type="range"
+                    min={20}
+                    max={150}
+                    step={1}
+                    value={campanhaDraft.clientTheme?.logoSize || DEFAULT_CLIENT_THEME.logoSize}
+                    onChange={(event) =>
+                      setCampanhaDraft({
+                        ...campanhaDraft,
+                        clientTheme: {
+                          ...DEFAULT_CLIENT_THEME,
+                          ...campanhaDraft.clientTheme,
+                          logoSize: Number(event.target.value),
+                        },
+                      })
+                    }
+                    className="w-full accent-emerald-400"
+                  />
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">Texto do adesivo superior</span>
+                  <textarea
+                    rows={3}
+                    maxLength={500}
+                    value={campanhaDraft.clientTheme?.topBannerText ?? DEFAULT_CLIENT_THEME.topBannerText}
+                    onChange={(event) =>
+                      setCampanhaDraft({
+                        ...campanhaDraft,
+                        clientTheme: {
+                          ...DEFAULT_CLIENT_THEME,
+                          ...campanhaDraft.clientTheme,
+                          topBannerText: event.target.value,
+                        },
+                      })
+                    }
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
+                  />
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">URL da logo do rodapé</span>
+                  <input
+                    maxLength={500}
+                    type="text"
+                    value={campanhaDraft.clientTheme?.logoUrl || DEFAULT_CLIENT_THEME.logoUrl}
+                    onChange={(event) =>
+                      setCampanhaDraft({
+                        ...campanhaDraft,
+                        clientTheme: {
+                          ...DEFAULT_CLIENT_THEME,
+                          ...campanhaDraft.clientTheme,
+                          logoUrl: event.target.value,
+                        },
+                      })
+                    }
+                    className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
+                  />
+                  <span className="block text-xs text-slate-500">Aceita URL HTTPS ou caminho local como /logo-cliente.png.</span>
+                </label>
+                <label className="text-sm space-y-1">
+                  <span className="text-slate-400">Enviar logo para o totem e cabeçalho</span>
+                  <input
+                    type="file"
+                    accept="image/png, image/jpeg, image/jpg, image/webp, image/svg+xml, image/*"
+                    disabled={uploadingThemeLogo}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void handleUploadThemeLogo(file);
+                      event.currentTarget.value = "";
+                    }}
+                    className="block w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-slate-300 file:mr-3 file:rounded-md file:border-0 file:bg-slate-700 file:px-3 file:py-1 file:text-white"
+                  />
+                  <span className="block text-xs text-slate-500">
+                    {uploadingThemeLogo ? "Carregando logo..." : "JPG, JPEG, PNG, WEBP e SVG; até 5 MB."}
+                  </span>
+                </label>
+              </div>
+              <button
+                type="submit"
+                disabled={saving}
+                className="rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2.5 disabled:opacity-60"
               >
-                <option value="ativa">Ativa</option>
-                <option value="pausada">Pausada</option>
-                <option value="encerrada">Encerrada</option>
-              </select>
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">Dias acumulados</span>
-              <input
-                type="number"
-                min={0}
-                step={1}
-                required
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
-                value={campanhaDraft.diasAcumulados}
-                onChange={(event) =>
-                  setCampanhaDraft({
-                    ...campanhaDraft,
-                    diasAcumulados: Number(event.target.value),
-                  })
-                }
-              />
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">Total de exibições acumuladas</span>
-              <input
-                type="number"
-                min={0}
-                step={1}
-                required
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
-                value={campanhaDraft.totalExibicoesAcumuladas}
-                onChange={(event) =>
-                  setCampanhaDraft({
-                    ...campanhaDraft,
-                    totalExibicoesAcumuladas: Number(event.target.value),
-                  })
-                }
-              />
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">Período do relatório</span>
-              <input
-                required
-                maxLength={200}
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
-                value={campanhaDraft.periodo}
-                onChange={(event) =>
-                  setCampanhaDraft({ ...campanhaDraft, periodo: event.target.value })
-                }
-              />
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">Cor da moldura da tela</span>
-              <input
-                type="color"
-                value={campanhaDraft.clientTheme?.frameColor || DEFAULT_CLIENT_THEME.frameColor}
-                onChange={(event) =>
-                  setCampanhaDraft({
-                    ...campanhaDraft,
-                    clientTheme: {
-                      ...DEFAULT_CLIENT_THEME,
-                      ...campanhaDraft.clientTheme,
-                      frameColor: event.target.value,
-                    },
-                  })
-                }
-                className="h-10 w-full rounded-lg bg-slate-950 border border-slate-700 p-1"
-              />
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">Cor primária dos botões</span>
-              <input
-                type="color"
-                value={campanhaDraft.clientTheme?.primaryColor || DEFAULT_CLIENT_THEME.primaryColor}
-                onChange={(event) =>
-                  setCampanhaDraft({
-                    ...campanhaDraft,
-                    clientTheme: {
-                      ...DEFAULT_CLIENT_THEME,
-                      ...campanhaDraft.clientTheme,
-                      primaryColor: event.target.value,
-                    },
-                  })
-                }
-                className="h-10 w-full rounded-lg bg-slate-950 border border-slate-700 p-1"
-              />
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">Cor do fundo da logo no totem</span>
-              <input
-                type="color"
-                value={campanhaDraft.clientTheme?.logoBgColor || DEFAULT_CLIENT_THEME.logoBgColor}
-                onChange={(event) =>
-                  setCampanhaDraft({
-                    ...campanhaDraft,
-                    clientTheme: {
-                      ...DEFAULT_CLIENT_THEME,
-                      ...campanhaDraft.clientTheme,
-                      logoBgColor: event.target.value,
-                    },
-                  })
-                }
-                className="h-10 w-full rounded-lg bg-slate-950 border border-slate-700 p-1"
-              />
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">
-                Tamanho da logo no totem: {campanhaDraft.clientTheme?.logoSize || DEFAULT_CLIENT_THEME.logoSize}px
-              </span>
-              <input
-                type="range"
-                min={20}
-                max={150}
-                step={1}
-                value={campanhaDraft.clientTheme?.logoSize || DEFAULT_CLIENT_THEME.logoSize}
-                onChange={(event) =>
-                  setCampanhaDraft({
-                    ...campanhaDraft,
-                    clientTheme: {
-                      ...DEFAULT_CLIENT_THEME,
-                      ...campanhaDraft.clientTheme,
-                      logoSize: Number(event.target.value),
-                    },
-                  })
-                }
-                className="w-full accent-emerald-400"
-              />
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">Texto do adesivo superior</span>
-              <textarea
-                rows={3}
-                maxLength={500}
-                value={campanhaDraft.clientTheme?.topBannerText ?? DEFAULT_CLIENT_THEME.topBannerText}
-                onChange={(event) =>
-                  setCampanhaDraft({
-                    ...campanhaDraft,
-                    clientTheme: {
-                      ...DEFAULT_CLIENT_THEME,
-                      ...campanhaDraft.clientTheme,
-                      topBannerText: event.target.value,
-                    },
-                  })
-                }
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
-              />
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">URL da logo do rodapé</span>
-              <input
-                maxLength={500}
-                type="text"
-                value={campanhaDraft.clientTheme?.logoUrl || DEFAULT_CLIENT_THEME.logoUrl}
-                onChange={(event) =>
-                  setCampanhaDraft({
-                    ...campanhaDraft,
-                    clientTheme: {
-                      ...DEFAULT_CLIENT_THEME,
-                      ...campanhaDraft.clientTheme,
-                      logoUrl: event.target.value,
-                    },
-                  })
-                }
-                className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
-              />
-              <span className="block text-xs text-slate-500">Aceita URL HTTPS ou caminho local como /logo-cliente.png.</span>
-            </label>
-            <label className="text-sm space-y-1">
-              <span className="text-slate-400">Enviar logo para o totem e cabeçalho</span>
-              <input
-                type="file"
-                accept="image/png, image/jpeg, image/jpg, image/webp, image/svg+xml, image/*"
-                disabled={uploadingThemeLogo}
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) void handleUploadThemeLogo(file);
-                  event.currentTarget.value = "";
-                }}
-                className="block w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-slate-300 file:mr-3 file:rounded-md file:border-0 file:bg-slate-700 file:px-3 file:py-1 file:text-white"
-              />
-              <span className="block text-xs text-slate-500">
-                {uploadingThemeLogo ? "Carregando logo..." : "JPG, JPEG, PNG, WEBP e SVG; até 5 MB."}
-              </span>
-            </label>
-          </div>
-          <button
-            type="submit"
-            disabled={saving}
-            className="rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2.5 disabled:opacity-60"
-          >
-            Salvar campanha
-          </button>
-        </form>
+                Salvar perfil da campanha
+              </button>
+            </form>
 
-        <form
-          onSubmit={handleSaveMetas}
-          className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-4"
-        >
-          <h2 className="text-lg font-bold text-white">Metas diárias por tela</h2>
-          <p className="text-xs text-slate-400">
-            Pontos e telas vinculados no banco local (ex.: Facho Restaurante → Tela 1 e Tela 2).
-          </p>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {telasDaCampanha.map((tela) => {
-              const index = telasDraft.findIndex((item) => item.id === tela.id);
-              const ponto = db.pontos.find((item) => item.id === tela.pontoId);
-              return (
-                <div key={tela.id} className="rounded-xl border border-slate-800 bg-slate-950 p-4 space-y-3">
-                  <p className="font-semibold text-white">
-                    {ponto?.nome || "Ponto"} • {tela.nome}
-                  </p>
-                  <label className="text-sm space-y-1 block">
-                    <span className="text-slate-400">Meta diária</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step={1}
-                      className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2"
-                      value={tela.metaDiaria ?? ""}
-                      onChange={(event) => {
-                        const next = [...telasDraft];
-                        next[index] = {
-                          ...tela,
-                          metaDiaria: event.target.value === "" ? null : Number(event.target.value),
-                        };
-                        setTelasDraft(next);
-                      }}
-                    />
-                  </label>
-                  <label className="text-sm space-y-1 block">
-                    <span className="text-slate-400">Status da tela</span>
-                    <select
-                      className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2"
-                      value={tela.status}
-                      onChange={(event) => {
-                        const next = [...telasDraft];
-                        next[index] = {
-                          ...tela,
-                          status: event.target.value as TelaPonto["status"],
-                        };
-                        setTelasDraft(next);
-                      }}
-                    >
-                      <option value="online">Online</option>
-                      <option value="offline">Offline</option>
-                      <option value="desconhecido">Não informado</option>
-                    </select>
-                  </label>
-                </div>
-              );
-            })}
-          </div>
-          <button
-            type="submit"
-            disabled={saving}
-            className="rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold px-4 py-2.5 disabled:opacity-60"
-          >
-            Salvar metas
-          </button>
-        </form>
-
-        <form
-          onSubmit={handleSaveRelatorios}
-          className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-4"
-        >
-          <h2 className="text-lg font-bold text-white">Relatórios diários de 30 dias</h2>
-          <p className="text-xs text-slate-400">
-            Exibições por tela, meta diária, falha/queda e observações. As datas agregadas sem detalhe por tela ficam identificadas, sem valores inventados.
-          </p>
-          {loadingClientData && (
-            <p role="status" className="text-sm text-sky-300">
-              Carregando metas, relatórios e PDFs deste cliente...
-            </p>
-          )}
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-            <label className="space-y-1 text-sm">
-              <span className="block text-slate-400">Adicionar dia ao histórico</span>
-              <input
-                type="date"
-                value={newReportDate}
-                onChange={(event) => setNewReportDate(event.target.value)}
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-200"
-              />
-            </label>
-            <button
-              type="button"
-              disabled={loadingClientData || telasDaCampanha.length === 0}
-              onClick={handleAddReportDay}
-              className="rounded-lg border border-sky-500/40 px-4 py-2 text-sm font-semibold text-sky-200 disabled:opacity-60"
+            <form
+              onSubmit={handleSaveMetas}
+              className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-4"
             >
-              Adicionar dia para todas as telas
-            </button>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-sm">
-              <thead>
-                <tr className="text-left text-slate-400 border-b border-slate-800">
-                  <th className="py-2 pr-3">Data</th>
-                  {telasDaCampanha.map((tela) => (
-                    <th key={tela.id} className="py-2 pr-3" colSpan={5}>
-                      {tela.nome}
-                    </th>
-                  ))}
-                </tr>
-                <tr className="text-left text-slate-500 border-b border-slate-800">
-                  <th className="py-2 pr-3" />
-                  {telasDaCampanha.map((tela) => (
-                    <React.Fragment key={`${tela.id}-sub`}>
-                      <th className="py-2 pr-3 font-medium">Meta diária</th>
-                      <th className="py-2 pr-3 font-medium">Exibições</th>
-                      <th className="py-2 pr-3 font-medium">Falha</th>
-                      <th className="py-2 pr-3 font-medium">Observação</th>
-                      <th className="py-2 pr-3 font-medium">Ação</th>
-                    </React.Fragment>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {datas.length === 0 && (
-                  <tr>
-                    <td colSpan={1 + telasDaCampanha.length * 5} className="py-4 text-center text-sm text-slate-400">
-                      Ainda não há histórico diário associado a esta campanha.
-                    </td>
-                  </tr>
+              <h2 className="text-lg font-bold text-white">Metas diárias por tela</h2>
+              <p className="text-xs text-slate-400">
+                Pontos e telas gravados no Supabase vinculados a este cliente.
+              </p>
+              {telasDaCampanha.length === 0 ? (
+                <p className="text-sm text-slate-400">
+                  Nenhuma tela cadastrada para esta campanha ainda. Importe um relatório PDF para preencher os pontos e telas automaticamente.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {telasDaCampanha.map((tela) => {
+                    const index = telasDraft.findIndex((item) => item.id === tela.id);
+                    const ponto = db.pontos.find((item) => item.id === tela.pontoId);
+                    return (
+                      <div key={tela.id} className="rounded-xl border border-slate-800 bg-slate-950 p-4 space-y-3">
+                        <p className="font-semibold text-white">
+                          {ponto?.nome || "Ponto"} • {tela.nome}
+                        </p>
+                        <label className="text-sm space-y-1 block">
+                          <span className="text-slate-400">Meta diária</span>
+                          <input
+                            type="number"
+                            min={0}
+                            step={1}
+                            className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2"
+                            value={tela.metaDiaria ?? ""}
+                            onChange={(event) => {
+                              const next = [...telasDraft];
+                              next[index] = {
+                                ...tela,
+                                metaDiaria: event.target.value === "" ? null : Number(event.target.value),
+                              };
+                              setTelasDraft(next);
+                            }}
+                          />
+                        </label>
+                        <label className="text-sm space-y-1 block">
+                          <span className="text-slate-400">Status da tela</span>
+                          <select
+                            className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2"
+                            value={tela.status}
+                            onChange={(event) => {
+                              const next = [...telasDraft];
+                              next[index] = {
+                                ...tela,
+                                status: event.target.value as TelaPonto["status"],
+                              };
+                              setTelasDraft(next);
+                            }}
+                          >
+                            <option value="online">Online</option>
+                            <option value="offline">Offline</option>
+                            <option value="desconhecido">Não informado</option>
+                          </select>
+                        </label>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {telasDaCampanha.length > 0 && (
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold px-4 py-2.5 disabled:opacity-60"
+                >
+                  Salvar metas
+                </button>
+              )}
+            </form>
+
+            <form
+              onSubmit={handleSaveRelatorios}
+              className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-4"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div>
+                  <h2 className="text-lg font-bold text-white">Relatórios diários de 30 dias</h2>
+                  <p className="text-xs text-slate-400">
+                    Insira e edite as exibições diárias entregues por tela, quedas e observações diretamente no Supabase.
+                  </p>
+                </div>
+                {loadingClientData && (
+                  <span role="status" className="text-xs font-semibold text-sky-300">
+                    Sincronizando com Supabase...
+                  </span>
                 )}
-                {datas.map((data) => (
-                  <tr key={data} className="border-b border-slate-800/80 align-top">
-                    <td className="py-2 pr-3 whitespace-nowrap font-mono text-slate-300">
-                      {formatDia(data)}
-                    </td>
-                    {telasDaCampanha.map((tela) => {
-                      const relatorio = relatoriosDraft.find(
-                        (item) => item.telaId === tela.id && item.data === data
-                      );
-                      if (!relatorio) {
-                        return (
-                          <td key={`${tela.id}-${data}-missing`} colSpan={5} className="py-2 pr-3 text-xs text-slate-500">
-                            Sem dados extraídos para esta tela nesta data.
-                          </td>
-                        );
-                      }
-                      return (
-                        <React.Fragment key={`${tela.id}-${data}`}>
-                          <td className="py-2 pr-3">
-                            <input
-                              type="number"
-                              min={0}
-                              step={1}
-                              className="w-24 rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5"
-                              value={relatorio.metaDiaria ?? ""}
-                              onChange={(event) =>
-                                updateRelatorio(tela.id, data, {
-                                  metaDiaria: event.target.value === "" ? null : Number(event.target.value),
-                                })
-                              }
-                              aria-label={`Meta diária de ${tela.nome} em ${formatDia(data)}`}
-                            />
-                          </td>
-                          <td className="py-2 pr-3">
-                            <input
-                              type="number"
-                              min={0}
-                              step={1}
-                              required
-                              className="w-24 rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5"
-                              value={relatorio.exibicoesEntregues}
-                              onChange={(event) =>
-                                updateRelatorio(tela.id, data, {
-                                  exibicoesEntregues: Number(event.target.value),
-                                })
-                              }
-                            />
-                          </td>
-                          <td className="py-2 pr-3">
-                            <input
-                              type="checkbox"
-                              checked={relatorio.falhaNominal}
-                              onChange={(event) =>
-                                updateRelatorio(tela.id, data, {
-                                  falhaNominal: event.target.checked,
-                                })
-                              }
-                            />
-                          </td>
-                          <td className="py-2 pr-3">
-                            <input
-                              className="w-52 rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5"
-                              value={relatorio.observacaoFalha || ""}
-                              onChange={(event) =>
-                                updateRelatorio(tela.id, data, {
-                                  observacaoFalha: event.target.value,
-                                })
-                              }
-                            />
-                          </td>
-                          <td className="py-2 pr-3">
-                            <button
-                              type="button"
-                              disabled={deletingDailyReport || saving}
-                              onClick={() => void handleDeleteDailyReport(relatorio)}
-                              className="rounded-md border border-rose-500/40 px-2 py-1 text-xs text-rose-300 disabled:opacity-60"
-                              aria-label={`Excluir registro de ${tela.nome} em ${formatDia(data)}`}
-                            >
-                              Excluir
-                            </button>
-                          </td>
+              </div>
+
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                <label className="space-y-1 text-sm">
+                  <span className="block text-slate-400">Adicionar data ao histórico</span>
+                  <input
+                    type="date"
+                    value={newReportDate}
+                    onChange={(event) => setNewReportDate(event.target.value)}
+                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-200"
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={loadingClientData || telasDaCampanha.length === 0}
+                  onClick={handleAddReportDay}
+                  className="rounded-lg border border-sky-500/40 px-4 py-2 text-sm font-semibold text-sky-200 disabled:opacity-60"
+                >
+                  Adicionar dia para todas as telas
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[760px] text-sm">
+                  <thead>
+                    <tr className="text-left text-slate-400 border-b border-slate-800">
+                      <th className="py-2 pr-3">Data</th>
+                      {telasDaCampanha.map((tela) => (
+                        <th key={tela.id} className="py-2 pr-3" colSpan={5}>
+                          {tela.nome}
+                        </th>
+                      ))}
+                    </tr>
+                    <tr className="text-left text-slate-500 border-b border-slate-800">
+                      <th className="py-2 pr-3" />
+                      {telasDaCampanha.map((tela) => (
+                        <React.Fragment key={`${tela.id}-sub`}>
+                          <th className="py-2 pr-3 font-medium">Meta diária</th>
+                          <th className="py-2 pr-3 font-medium">Exibições</th>
+                          <th className="py-2 pr-3 font-medium">Falha</th>
+                          <th className="py-2 pr-3 font-medium">Observação</th>
+                          <th className="py-2 pr-3 font-medium">Ação</th>
                         </React.Fragment>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <button
-            type="submit"
-            disabled={saving || deletingDailyReport || loadingClientData || !campanhaDraft}
-            className="rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2.5 disabled:opacity-60"
-          >
-            Salvar relatórios diários
-          </button>
-        </form>
-        </>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {datas.length === 0 && (
+                      <tr>
+                        <td colSpan={1 + Math.max(1, telasDaCampanha.length) * 5} className="py-4 text-center text-sm text-slate-400">
+                          {telasDaCampanha.length === 0
+                            ? "Nenhuma tela disponível para este cliente."
+                            : "Ainda não há histórico diário gravado para esta campanha."}
+                        </td>
+                      </tr>
+                    )}
+                    {datas.map((data) => (
+                      <tr key={data} className="border-b border-slate-800/80 align-top">
+                        <td className="py-2 pr-3 whitespace-nowrap font-mono text-slate-300">
+                          {formatDia(data)}
+                        </td>
+                        {telasDaCampanha.map((tela) => {
+                          const relatorio = relatoriosDraft.find(
+                            (item) => item.telaId === tela.id && item.data === data
+                          );
+                          if (!relatorio) {
+                            return (
+                              <td key={`${tela.id}-${data}-missing`} colSpan={5} className="py-2 pr-3 text-xs text-slate-500">
+                                <div className="flex items-center gap-2">
+                                  <span>Sem registro nesta data.</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const newRow: RelatorioDiarioTela = {
+                                        id: crypto.randomUUID(),
+                                        data,
+                                        telaId: tela.id,
+                                        exibicoesEntregues: 0,
+                                        metaDiaria: tela.metaDiaria,
+                                        falhaNominal: false,
+                                        statusRelatorio: "desconhecido",
+                                        observacaoFalha: "",
+                                      };
+                                      setRelatoriosDraft((prev) => [...prev, newRow]);
+                                    }}
+                                    className="rounded border border-slate-700 px-2 py-0.5 text-xs text-sky-300 hover:border-sky-500"
+                                  >
+                                    + Inserir
+                                  </button>
+                                </div>
+                              </td>
+                            );
+                          }
+                          return (
+                            <React.Fragment key={`${tela.id}-${data}`}>
+                              <td className="py-2 pr-3">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step={1}
+                                  className="w-24 rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5"
+                                  value={relatorio.metaDiaria ?? ""}
+                                  onChange={(event) =>
+                                    updateRelatorio(tela.id, data, {
+                                      metaDiaria: event.target.value === "" ? null : Number(event.target.value),
+                                    })
+                                  }
+                                  aria-label={`Meta diária de ${tela.nome} em ${formatDia(data)}`}
+                                />
+                              </td>
+                              <td className="py-2 pr-3">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step={1}
+                                  required
+                                  className="w-24 rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5"
+                                  value={relatorio.exibicoesEntregues}
+                                  onChange={(event) =>
+                                    updateRelatorio(tela.id, data, {
+                                      exibicoesEntregues: Number(event.target.value),
+                                    })
+                                  }
+                                />
+                              </td>
+                              <td className="py-2 pr-3">
+                                <input
+                                  type="checkbox"
+                                  checked={relatorio.falhaNominal}
+                                  onChange={(event) =>
+                                    updateRelatorio(tela.id, data, {
+                                      falhaNominal: event.target.checked,
+                                    })
+                                  }
+                                />
+                              </td>
+                              <td className="py-2 pr-3">
+                                <input
+                                  className="w-52 rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5"
+                                  value={relatorio.observacaoFalha || ""}
+                                  onChange={(event) =>
+                                    updateRelatorio(tela.id, data, {
+                                      observacaoFalha: event.target.value,
+                                    })
+                                  }
+                                />
+                              </td>
+                              <td className="py-2 pr-3">
+                                <button
+                                  type="button"
+                                  disabled={deletingDailyReport || saving}
+                                  onClick={() => void handleDeleteDailyReport(relatorio)}
+                                  className="rounded-md border border-rose-500/40 px-2 py-1 text-xs text-rose-300 disabled:opacity-60"
+                                  aria-label={`Excluir registro de ${tela.nome} em ${formatDia(data)}`}
+                                >
+                                  Excluir
+                                </button>
+                              </td>
+                            </React.Fragment>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <button
+                type="submit"
+                disabled={saving || deletingDailyReport || loadingClientData || !campanhaDraft || telasDaCampanha.length === 0}
+                className="rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2.5 disabled:opacity-60"
+              >
+                {saving ? "Salvando no Supabase..." : "Salvar relatórios diários"}
+              </button>
+            </form>
+          </>
         )}
       </main>
     </div>
