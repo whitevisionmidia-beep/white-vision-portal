@@ -29,7 +29,7 @@ Portal White Vision com React/Vite, Supabase Auth, Postgres, Storage e Edge Func
    - Entre no portal como administrador e use **Configuração da chave Groq**. A chave fica em `private_settings`, acessível somente às Edge Functions por service role, e pode ser testada na própria tela.
    - Ou configure `GROQ_API_KEY` como secret da Edge Function no painel do Supabase.
 
-   A chave configurada no portal tem prioridade sobre `GROQ_API_KEY`. A Edge Function `analyze-pdf` usa `llama-3.1-8b-instant`; a chave nunca é retornada ao navegador.
+   A chave configurada no portal tem prioridade sobre `GROQ_API_KEY`. As Edge Functions `analyze-pdf` e `groq-admin` usam `llama-3.3-70b-versatile`; a chave nunca é retornada ao navegador.
 
 5. Na Vercel, configure `VITE_SUPABASE_URL=https://dfyzynhymcwaousvtzkp.supabase.co` e `VITE_SUPABASE_ANON_KEY` para Production, Preview e Development, e faça novo deploy.
 

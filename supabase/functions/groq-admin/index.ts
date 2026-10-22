@@ -3,7 +3,7 @@ import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 
 const keyName = "groq_api_key";
 const groqEndpoint = "https://api.groq.com/openai/v1/chat/completions";
-const model = "llama-3.1-8b-instant";
+const model = "llama-3.3-70b-versatile";
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
