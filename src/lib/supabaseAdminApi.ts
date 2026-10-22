@@ -379,6 +379,39 @@ export async function fetchEstado(): Promise<{ db: WhiteVisionDb }> {
   return asDb(await snapshot());
 }
 
+export async function fetchClientAdminData(campaignId: string): Promise<{
+  campanha: CampanhaCliente;
+  pontos: PontoTela[];
+  telas: TelaPonto[];
+  relatoriosDiarios: RelatorioDiarioTela[];
+  relatoriosPdf: PdfReportUpload[];
+}> {
+  const supabase = getSupabase();
+  const campaignResult = await supabase.from("campaigns").select("*").eq("id", campaignId).single();
+  const campaign = campaignFromRow(unwrap(campaignResult) as Row);
+  const pointResult = await supabase.from("points").select("*").eq("campaign_id", campaignId);
+  const pontos = unwrap(pointResult).map((row) => pointFromRow(row as Row));
+  const pointIds = pontos.map((point) => point.id);
+  const screenResult = pointIds.length
+    ? await supabase.from("screens").select("*").in("point_id", pointIds)
+    : { data: [], error: null };
+  const telas = unwrap(screenResult).map((row) => screenFromRow(row as Row));
+  const screenIds = telas.map((screen) => screen.id);
+  const [dailyResult, pdfResult] = await Promise.all([
+    screenIds.length
+      ? supabase.from("daily_screen_reports").select("*").in("screen_id", screenIds).order("report_date")
+      : Promise.resolve({ data: [], error: null }),
+    supabase.from("pdf_reports").select("*").eq("campaign_id", campaignId).order("created_at", { ascending: false }),
+  ]);
+  return {
+    campanha: campaign,
+    pontos,
+    telas,
+    relatoriosDiarios: unwrap(dailyResult).map((row) => dailyFromRow(row as Row)),
+    relatoriosPdf: unwrap(pdfResult).map((row) => pdfFromRow(row as Row)),
+  };
+}
+
 export type GroqKeyStatus = "ambiente" | "portal" | "ausente" | "indisponivel";
 
 async function invokeGroqAdmin<T>(body: Row): Promise<T> {
@@ -648,8 +681,15 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
       const screenPerformance = dashboardPerformance.get(
         `${normalizeName(point.nome)}::${normalizeName(screen.nome)}`
       );
+      const screenPeriodReports = daily.filter((item) =>
+        item.telaId === screen.id && (!periodDates.size || periodDates.has(item.data))
+      );
+      const dailyScreenTotal = screenPeriodReports.reduce(
+        (sum, item) => sum + numberFrom(item.exibicoesEntregues),
+        0
+      );
       const total =
-        screenPerformance?.insercoes ??
+        (screenPeriodReports.length ? dailyScreenTotal : screenPerformance?.insercoes) ??
         daily
           .filter((item) => item.telaId === screen.id)
           .reduce((sum, item) => sum + item.exibicoesEntregues, 0);
@@ -688,6 +728,7 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
   daily.forEach((item) => dailyByDate.set(item.data, [...(dailyByDate.get(item.data) || []), item]));
   const savedHistory = [...(metrics.historicoDiario || [])]
     .sort((left, right) => left.data.localeCompare(right.data));
+  const periodDates = new Set(savedHistory.map((item) => item.data));
   const historicoDiario = savedHistory.length
     ? savedHistory.map((item) => ({
         dia: `${item.data.slice(8, 10)}/${item.data.slice(5, 7)}`,
@@ -823,8 +864,23 @@ export async function saveTela(
 }
 
 export async function saveRelatorios(
+  campaignId: string,
   items: RelatorioDiarioTela[]
 ): Promise<{ db: WhiteVisionDb }> {
+  const pointResult = await getSupabase()
+    .from("points")
+    .select("id")
+    .eq("campaign_id", campaignId);
+  const pointIds = unwrap(pointResult).map((row) => String((row as Row).id));
+  const screenResult = pointIds.length
+    ? await getSupabase().from("screens").select("id").in("point_id", pointIds)
+    : { data: [], error: null };
+  const campaignScreenIds = new Set(
+    unwrap(screenResult).map((row) => String((row as Row).id))
+  );
+  if (items.some((item) => !campaignScreenIds.has(item.telaId))) {
+    throw new Error("Há registros diários que não pertencem ao cliente selecionado.");
+  }
   const rows = items.map((item) => ({
     report_date: item.data,
     screen_id: item.telaId,
@@ -839,98 +895,88 @@ export async function saveRelatorios(
       onConflict: "report_date,screen_id",
     });
     if (result.error) throw new Error(result.error.message);
-    await syncDashboardDailyHistory(items);
+    await syncDashboardDailyHistory(campaignId, items);
   }
   return asDb(await snapshot());
 }
 
-async function syncDashboardDailyHistory(items: RelatorioDiarioTela[]): Promise<void> {
-  const screenIds = [...new Set(items.map((item) => item.telaId))];
-  if (!screenIds.length) return;
+async function syncDashboardDailyHistory(
+  campaignId: string,
+  items: RelatorioDiarioTela[],
+  removedDates: string[] = []
+): Promise<void> {
   const supabase = getSupabase();
-  const selectedScreens = unwrap(
-    await supabase.from("screens").select("id,point_id").in("id", screenIds)
-  ) as Row[];
-  const pointIds = [...new Set(selectedScreens.map((row) => String(row.point_id)))];
-  if (!pointIds.length) return;
-  const selectedPoints = unwrap(
-    await supabase.from("points").select("id,campaign_id").in("id", pointIds)
-  ) as Row[];
-  const campaignByScreen = new Map<string, string>();
-  const screenIdsByCampaign = new Map<string, Set<string>>();
-  const pointCampaign = new Map(
-    selectedPoints.map((point) => [String(point.id), String(point.campaign_id)])
+  const campaignResult = await supabase
+    .from("campaigns")
+    .select("dashboard_metrics")
+    .eq("id", campaignId)
+    .single();
+  const metrics = metricsFromValue((unwrap(campaignResult) as Row).dashboard_metrics);
+  const itemsByDate = new Map<string, RelatorioDiarioTela[]>();
+  items.forEach((item) =>
+    itemsByDate.set(item.data, [...(itemsByDate.get(item.data) || []), item])
   );
-  selectedScreens.forEach((screen) => {
-    const campaignId = pointCampaign.get(String(screen.point_id));
-    if (!campaignId) return;
-    campaignByScreen.set(String(screen.id), campaignId);
-  });
-  const campaignIds = [...new Set(pointCampaign.values())];
-  if (!campaignIds.length) return;
-  const allPoints = unwrap(
-    await supabase.from("points").select("id,campaign_id").in("campaign_id", campaignIds)
-  ) as Row[];
-  const allPointIds = allPoints.map((point) => String(point.id));
-  const allScreens = allPointIds.length
-    ? unwrap(await supabase.from("screens").select("id,point_id").in("point_id", allPointIds)) as Row[]
-    : [];
-  const allPointCampaign = new Map(
-    allPoints.map((point) => [String(point.id), String(point.campaign_id)])
-  );
-  allScreens.forEach((screen) => {
-    const campaignId = allPointCampaign.get(String(screen.point_id));
-    if (!campaignId) return;
-    const campaignScreens = screenIdsByCampaign.get(campaignId) || new Set<string>();
-    campaignScreens.add(String(screen.id));
-    screenIdsByCampaign.set(campaignId, campaignScreens);
-  });
-  const campaigns = unwrap(
-    await supabase.from("campaigns").select("id,dashboard_metrics").in("id", campaignIds)
-  ) as Row[];
-
-  for (const campaign of campaigns) {
-    const campaignId = String(campaign.id);
-    const campaignItems = items.filter((item) => campaignByScreen.get(item.telaId) === campaignId);
-    const itemsByDate = new Map<string, RelatorioDiarioTela[]>();
-    campaignItems.forEach((item) =>
-      itemsByDate.set(item.data, [...(itemsByDate.get(item.data) || []), item])
-    );
-    const metrics = metricsFromValue(campaign.dashboard_metrics);
-    const existingHistory = metrics.historicoDiario || [];
-    const historyByDate = new Map(existingHistory.map((day) => [day.data, day]));
-    const datesToSync = existingHistory.length
-      ? existingHistory.map((day) => day.data)
-      : [...itemsByDate.keys()].sort();
-    const expectedScreenCount = screenIdsByCampaign.get(campaignId)?.size || 0;
-    for (const date of datesToSync) {
-      const dayItems = itemsByDate.get(date);
-      if (!dayItems || new Set(dayItems.map((item) => item.telaId)).size !== expectedScreenCount) continue;
-      const insertions = dayItems.reduce((sum, item) => sum + numberFrom(item.exibicoesEntregues), 0);
-      const hasFailure = dayItems.some((item) => item.falhaNominal);
-      historyByDate.set(date, {
-        data: date,
-        insercoes: insertions,
-        status: insertions === 0 ? "zerado" : hasFailure ? "alerta" : "normal",
-      });
-    }
-    const historicoDiario = [...historyByDate.values()].sort((left, right) =>
-      left.data.localeCompare(right.data)
-    );
-    const update = await supabase.from("campaigns").update({
-      dashboard_metrics: {
-        ...metrics,
-        historicoDiario,
-        insercoesPeriodo: historicoDiario.reduce((sum, day) => sum + numberFrom(day.insercoes), 0),
-      },
-    }).eq("id", campaignId);
-    if (update.error) throw new Error(update.error.message);
+  const historyByDate = new Map((metrics.historicoDiario || []).map((day) => [day.data, day]));
+  removedDates.forEach((date) => historyByDate.delete(date));
+  for (const [date, dayItems] of itemsByDate) {
+    const insertions = dayItems.reduce((sum, item) => sum + numberFrom(item.exibicoesEntregues), 0);
+    const hasFailure = dayItems.some((item) => item.falhaNominal);
+    historyByDate.set(date, {
+      data: date,
+      insercoes: insertions,
+      status: insertions === 0 ? "zerado" : hasFailure ? "alerta" : "normal",
+    });
   }
+  const historicoDiario = [...historyByDate.values()].sort((left, right) =>
+    left.data.localeCompare(right.data)
+  );
+  const update = await supabase.from("campaigns").update({
+    dashboard_metrics: { ...metrics, historicoDiario },
+  }).eq("id", campaignId);
+  if (update.error) throw new Error(update.error.message);
 }
 
-export async function deleteRelatorioDiario(reportId: string): Promise<{ db: WhiteVisionDb }> {
-  const result = await getSupabase().from("daily_screen_reports").delete().eq("id", reportId);
+export async function deleteRelatorioDiario(
+  campaignId: string,
+  reportId: string
+): Promise<{ db: WhiteVisionDb }> {
+  const supabase = getSupabase();
+  const reportResult = await supabase
+    .from("daily_screen_reports")
+    .select("id,report_date,screen_id")
+    .eq("id", reportId)
+    .single();
+  const report = unwrap(reportResult) as Row;
+  const screen = unwrap(await supabase
+    .from("screens")
+    .select("id,point_id")
+    .eq("id", report.screen_id)
+    .single()) as Row;
+  const point = unwrap(await supabase
+    .from("points")
+    .select("campaign_id")
+    .eq("id", screen.point_id)
+    .single()) as Row;
+  if (point.campaign_id !== campaignId) {
+    throw new Error("O registro diário não pertence ao cliente selecionado.");
+  }
+  const result = await supabase.from("daily_screen_reports").delete().eq("id", reportId);
   if (result.error) throw new Error(result.error.message);
+  const pointsResult = await supabase.from("points").select("id").eq("campaign_id", campaignId);
+  const pointIds = unwrap(pointsResult).map((row) => String((row as Row).id));
+  const screenResult = pointIds.length
+    ? await supabase.from("screens").select("id").in("point_id", pointIds)
+    : { data: [], error: null };
+  const screenIds = unwrap(screenResult).map((row) => String((row as Row).id));
+  const remainingResult = screenIds.length
+    ? await supabase
+        .from("daily_screen_reports")
+        .select("*")
+        .eq("report_date", report.report_date)
+        .in("screen_id", screenIds)
+    : { data: [], error: null };
+  const remaining = unwrap(remainingResult).map((row) => dailyFromRow(row as Row));
+  await syncDashboardDailyHistory(campaignId, remaining, remaining.length ? [] : [String(report.report_date)]);
   return asDb(await snapshot());
 }
 

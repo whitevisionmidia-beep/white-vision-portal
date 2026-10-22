@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
 import {
   fetchEstado,
+  fetchClientAdminData,
   fetchGroqKeyStatus,
   generatePdfReportSummary,
   importPdfReport,
@@ -70,6 +71,13 @@ export function AdminPage() {
   const [reportPdf, setReportPdf] = useState<File | null>(null);
   const [importingPdf, setImportingPdf] = useState(false);
   const [deletingDailyReport, setDeletingDailyReport] = useState(false);
+  const [loadingClientData, setLoadingClientData] = useState(false);
+  const [newReportDate, setNewReportDate] = useState(() => {
+    const date = new Date();
+    date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+    return date.toISOString().slice(0, 10);
+  });
+  const clientSelectionRequest = useRef(0);
   const [profileSavedLink, setProfileSavedLink] = useState<{
     clientName: string;
     clientPath: string;
@@ -195,6 +203,80 @@ export function AdminPage() {
     }
   };
 
+  const selectClientForAdmin = async (campaignId: string) => {
+    setPdfClientId(campaignId);
+    if (!campaignId) {
+      setCampanhaDraft(null);
+      setTelasDraft([]);
+      setRelatoriosDraft([]);
+      return;
+    }
+    const requestId = ++clientSelectionRequest.current;
+    setLoadingClientData(true);
+    setError(null);
+    try {
+      const clientData = await fetchClientAdminData(campaignId);
+      if (requestId !== clientSelectionRequest.current) return;
+      setCampanhaDraft(clientData.campanha);
+      setTelasDraft((previous) => [
+        ...previous.filter((screen) =>
+          !db?.pontos.some((point) => point.campanhaId === campaignId && point.id === screen.pontoId)
+        ),
+        ...clientData.telas,
+      ]);
+      const previousScreenIds = new Set(
+        db?.telas
+          .filter((screen) => db.pontos.some(
+            (point) => point.campanhaId === campaignId && point.id === screen.pontoId
+          ))
+          .map((screen) => screen.id) || []
+      );
+      setRelatoriosDraft((previous) => [
+        ...previous.filter((report) => !previousScreenIds.has(report.telaId)),
+        ...clientData.relatoriosDiarios,
+      ]);
+      setDb((previous) => {
+        if (!previous) return previous;
+        const currentPointIds = new Set(
+          previous.pontos
+            .filter((point) => point.campanhaId === campaignId)
+            .map((point) => point.id)
+        );
+        const currentScreenIds = new Set(
+          previous.telas.filter((screen) => currentPointIds.has(screen.pontoId)).map((screen) => screen.id)
+        );
+        return {
+          ...previous,
+          campanhas: previous.campanhas.map((campaign) =>
+            campaign.id === campaignId ? clientData.campanha : campaign
+          ),
+          pontos: [
+            ...previous.pontos.filter((point) => point.campanhaId !== campaignId),
+            ...clientData.pontos,
+          ],
+          telas: [
+            ...previous.telas.filter((screen) => !currentPointIds.has(screen.pontoId)),
+            ...clientData.telas,
+          ],
+          relatoriosDiarios: [
+            ...previous.relatoriosDiarios.filter((report) => !currentScreenIds.has(report.telaId)),
+            ...clientData.relatoriosDiarios,
+          ],
+          relatoriosPdf: [
+            ...previous.relatoriosPdf.filter((report) => report.campanhaId !== campaignId),
+            ...clientData.relatoriosPdf,
+          ],
+        };
+      });
+    } catch (err) {
+      if (requestId === clientSelectionRequest.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (requestId === clientSelectionRequest.current) setLoadingClientData(false);
+    }
+  };
+
   const flash = (text: string) => {
     setMessage(text);
     window.setTimeout(() => setMessage(null), 2500);
@@ -262,10 +344,15 @@ export function AdminPage() {
 
   const handleSaveRelatorios = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (!campanhaDraft) {
+      setError("Selecione um cliente antes de salvar os relatórios diários.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
       const payload = await saveRelatorios(
+        campanhaDraft.id,
         relatoriosDaCampanha.map((item) => ({
           ...item,
           exibicoesEntregues: Number(item.exibicoesEntregues),
@@ -293,12 +380,47 @@ export function AdminPage() {
     );
   };
 
+  const handleAddReportDay = () => {
+    if (!campanhaDraft || !newReportDate || telasDaCampanha.length === 0) {
+      setError("Selecione um cliente com telas e informe a data do novo relatório.");
+      return;
+    }
+    const existing = new Set(
+      relatoriosDaCampanha
+        .filter((item) => item.data === newReportDate)
+        .map((item) => item.telaId)
+    );
+    const newRows = telasDaCampanha
+      .filter((screen) => !existing.has(screen.id))
+      .map((screen) => ({
+        id: crypto.randomUUID(),
+        data: newReportDate,
+        telaId: screen.id,
+        exibicoesEntregues: 0,
+        metaDiaria: screen.metaDiaria,
+        falhaNominal: false,
+        statusRelatorio: "desconhecido" as const,
+        observacaoFalha: "",
+      }));
+    if (!newRows.length) {
+      setError("Já existem registros para todas as telas nesta data.");
+      return;
+    }
+    setError(null);
+    setRelatoriosDraft((previous) => [...previous, ...newRows]);
+  };
+
   const handleDeleteDailyReport = async (report: RelatorioDiarioTela) => {
     if (!window.confirm(`Excluir o registro diário de ${formatDia(report.data)} desta tela?`)) return;
+    if (!db?.relatoriosDiarios.some((item) => item.id === report.id)) {
+      setRelatoriosDraft((previous) => previous.filter((item) => item.id !== report.id));
+      return;
+    }
     setDeletingDailyReport(true);
     setError(null);
     try {
-      const payload = await deleteRelatorioDiario(report.id);
+      if (!campanhaDraft) return;
+      const payload = await deleteRelatorioDiario(campanhaDraft.id, report.id);
       setDb(payload.db);
       setRelatoriosDraft((previous) => previous.filter((item) => item.id !== report.id));
       flash("Registro diário excluído.");
@@ -321,8 +443,12 @@ export function AdminPage() {
       applyDb(payload.db);
       setClientNameDraft("");
       setClientCampaignDraft("");
-      setMediaCampaignId(payload.db.campanhas[payload.db.campanhas.length - 1]?.id || "");
-      flash("Cliente cadastrado e link exclusivo criado.");
+      const createdClient = payload.db.campanhas[payload.db.campanhas.length - 1];
+      if (createdClient) {
+        setMediaCampaignId(createdClient.id);
+        await selectClientForAdmin(createdClient.id);
+        flash("Cliente cadastrado, selecionado e histórico carregado.");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -341,8 +467,8 @@ export function AdminPage() {
       });
       const createdClient = payload.db.campanhas[payload.db.campanhas.length - 1];
       applyDb(payload.db);
-      setPdfClientId(createdClient.id);
       setMediaCampaignId(createdClient.id);
+      await selectClientForAdmin(createdClient.id);
       setImportedReport(null);
       setPdfClientNameDraft("");
       setPdfCampaignNameDraft("");
@@ -907,9 +1033,10 @@ export function AdminPage() {
               required
               value={pdfClientId}
               onChange={(event) => {
-                setPdfClientId(event.target.value);
+                void selectClientForAdmin(event.target.value);
                 setImportedReport(null);
               }}
+              disabled={loadingClientData}
               className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
             >
               <option value="" disabled>Selecione o cliente que receberá os dados</option>
@@ -1320,11 +1447,8 @@ export function AdminPage() {
             <span className="text-slate-400">Cliente / campanha</span>
             <select
               value={campanhaDraft.id}
-              onChange={(event) =>
-                setCampanhaDraft(
-                  db.campanhas.find((campaign) => campaign.id === event.target.value) || null
-                )
-              }
+              onChange={(event) => void selectClientForAdmin(event.target.value)}
+              disabled={loadingClientData}
               className="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2"
             >
               {db.campanhas.map((campaign) => (
@@ -1640,6 +1764,30 @@ export function AdminPage() {
           <p className="text-xs text-slate-400">
             Exibições por tela, meta diária, falha/queda e observações. As datas agregadas sem detalhe por tela ficam identificadas, sem valores inventados.
           </p>
+          {loadingClientData && (
+            <p role="status" className="text-sm text-sky-300">
+              Carregando metas, relatórios e PDFs deste cliente...
+            </p>
+          )}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <label className="space-y-1 text-sm">
+              <span className="block text-slate-400">Adicionar dia ao histórico</span>
+              <input
+                type="date"
+                value={newReportDate}
+                onChange={(event) => setNewReportDate(event.target.value)}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-200"
+              />
+            </label>
+            <button
+              type="button"
+              disabled={loadingClientData || telasDaCampanha.length === 0}
+              onClick={handleAddReportDay}
+              className="rounded-lg border border-sky-500/40 px-4 py-2 text-sm font-semibold text-sky-200 disabled:opacity-60"
+            >
+              Adicionar dia para todas as telas
+            </button>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[760px] text-sm">
               <thead>
@@ -1763,7 +1911,7 @@ export function AdminPage() {
           </div>
           <button
             type="submit"
-            disabled={saving || deletingDailyReport}
+            disabled={saving || deletingDailyReport || loadingClientData || !campanhaDraft}
             className="rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2.5 disabled:opacity-60"
           >
             Salvar relatórios diários
