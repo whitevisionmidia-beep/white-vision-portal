@@ -199,7 +199,7 @@ Use somente informações explícitas do documento. Para campos ausentes, use st
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "llama-3.3-70b-specdec",
+      model: "llama-3.3-70b-versatile",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: pdfText },
