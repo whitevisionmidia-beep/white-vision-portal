@@ -3,7 +3,6 @@ export interface SubTelaItem {
   nome: string; // Ex: "Tela 1", "Tela 2"
   exibicoes: number; // Ex: 1108
   detalhes?: string;
-  mediaDiaria?: number;
   metaDiariaEsperada: number | null;
   status: "online" | "offline" | "desconhecido";
   evidenciaMetaDiaria?: string;
@@ -17,6 +16,7 @@ export interface LocalPontoItem {
   endereco?: string;
   horarioFuncionamento: string; // Ex: "11:00 às 23:00 - 12h/dia"
   totalExibicoes: number; // Ex: 2136
+  links?: Array<{ rotulo: string; url: string }>;
   telas: SubTelaItem[];
   evidenciaEndereco?: string;
   evidenciaHorarioFuncionamento?: string;
@@ -44,6 +44,11 @@ export interface DesempenhoPorTelaItem {
   telaNome: string;
   insercoes: number;
   detalhes?: string;
+}
+
+export interface LinkRelatorioItem {
+  rotulo: string;
+  url: string;
 }
 
 export interface HistoricoDiarioSnapshotItem {

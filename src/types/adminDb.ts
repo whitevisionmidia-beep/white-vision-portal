@@ -20,6 +20,11 @@ export interface CampanhaCliente {
     metaDiaria?: number;
     telasAtivas?: number;
     desempenhoPorTela?: DesempenhoPorTelaItem[];
+    locais?: Array<{
+      nome: string;
+      horarioFuncionamento: string;
+      links: Array<{ rotulo: string; url: string }>;
+    }>;
     historicoDiario?: HistoricoDiarioSnapshotItem[];
   };
 }

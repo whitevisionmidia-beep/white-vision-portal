@@ -7,7 +7,7 @@ import type {
   VideoPortal,
   WhiteVisionDb,
 } from "../types/adminDb";
-import type { ClientTheme, RelatorioData } from "../types/whiteVision";
+import type { ClientTheme, LinkRelatorioItem, RelatorioData } from "../types/whiteVision";
 import { DEFAULT_CLIENT_THEME } from "../types/whiteVision";
 import { getPublicMediaUrl, getSupabase } from "./supabase";
 
@@ -372,13 +372,18 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
       item,
     ])
   );
-  const dates = [
-    ...new Set(
-      metrics.historicoDiario?.map((item) => item.data) || daily.map((item) => item.data)
-    ),
-  ];
-  const locais = points.map((point) => {
-    const pointScreens = screens.filter((screen) => screen.pontoId === point.id);
+  const localSnapshots = new Map(
+    (metrics.locais || []).map((item) => [normalizeName(item.nome), item])
+  );
+  const reportPoints = localSnapshots.size
+    ? points.filter((point) => localSnapshots.has(normalizeName(point.nome)))
+    : points;
+  const locais = reportPoints.map((point) => {
+    const pointScreens = screens.filter((screen) =>
+      screen.pontoId === point.id &&
+      (!dashboardPerformance.size ||
+        dashboardPerformance.has(`${normalizeName(point.nome)}::${normalizeName(screen.nome)}`))
+    );
     const mappedScreens = pointScreens.map((screen) => {
       const screenPerformance = dashboardPerformance.get(
         `${normalizeName(point.nome)}::${normalizeName(screen.nome)}`
@@ -395,25 +400,36 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
         nome: screen.nome,
         exibicoes: total,
         detalhes: screenPerformance?.detalhes,
-        mediaDiaria: dates.length ? Math.round(total / dates.length) : 0,
         metaDiariaEsperada: screen.metaDiaria,
         status: screen.status,
         statusOscilacao: failed?.observacaoFalha,
       };
     });
+    const localSnapshot = localSnapshots.get(normalizeName(point.nome));
     return {
       id: point.id,
       nome: point.nome,
       endereco: point.endereco,
-      horarioFuncionamento: point.horarioFuncionamento,
+      horarioFuncionamento:
+        localSnapshot?.horarioFuncionamento || point.horarioFuncionamento || "Horário não informado",
       totalExibicoes: mappedScreens.reduce((sum, item) => sum + item.exibicoes, 0),
+      links: (localSnapshot?.links || []).filter((link): link is LinkRelatorioItem => {
+        try {
+          const parsed = new URL(link.url);
+          return parsed.protocol === "http:" || parsed.protocol === "https:";
+        } catch {
+          return false;
+        }
+      }),
       telas: mappedScreens,
     };
   });
   const dailyByDate = new Map<string, RelatorioDiarioTela[]>();
   daily.forEach((item) => dailyByDate.set(item.data, [...(dailyByDate.get(item.data) || []), item]));
-  const historicoDiario = metrics.historicoDiario?.length
-    ? metrics.historicoDiario.map((item) => ({
+  const savedHistory = [...(metrics.historicoDiario || [])]
+    .sort((left, right) => left.data.localeCompare(right.data));
+  const historicoDiario = savedHistory.length
+    ? savedHistory.map((item) => ({
         dia: `${item.data.slice(8, 10)}/${item.data.slice(5, 7)}`,
         insercoes: item.insercoes,
         status: item.status,

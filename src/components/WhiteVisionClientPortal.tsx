@@ -17,6 +17,7 @@ import {
   MonitorCheck,
   AlertCircle,
   Lightbulb,
+  ExternalLink,
 } from "lucide-react";
 import {
   DEFAULT_CLIENT_THEME,
@@ -406,6 +407,23 @@ export function WhiteVisionClientPortal({
                     </div>
                   </button>
 
+                  {local.links && local.links.length > 0 && (
+                    <div className="flex flex-wrap gap-2 px-5 pb-4">
+                      {local.links.map((link, index) => (
+                        <a
+                          key={`${link.url}-${index}`}
+                          href={link.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-950/30 px-3 py-1.5 text-xs font-medium text-sky-300 hover:bg-sky-900/40"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                          {link.rotulo}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+
                   {/* Conteúdo Expandido: Meta Diária e Auditoria Nominal por Tela */}
                   {isExpanded && (
                     <div className="px-5 pb-5 pt-2 border-t border-slate-800/80 bg-slate-950/50">
@@ -469,9 +487,6 @@ export function WhiteVisionClientPortal({
                                   {percentualLocal}% do local
                                 </span>
                               </div>
-                              <p className="mt-1 text-xs font-medium text-sky-300">
-                                ~{(tela.mediaDiaria ?? 0).toLocaleString("pt-BR")} exibições/dia nesta tela
-                              </p>
                               {tela.detalhes && (
                                 <p className="mt-2 text-xs leading-relaxed text-slate-300">
                                   {tela.detalhes}
@@ -484,7 +499,7 @@ export function WhiteVisionClientPortal({
                                 <strong className="text-slate-200 font-mono">
                                   {tela.metaDiariaEsperada === null
                                     ? "Não informado no relatório"
-                                    : `~${tela.metaDiariaEsperada} exibições/dia`}
+                                    : `${tela.metaDiariaEsperada} exibições/dia`}
                                 </strong>
                               </div>
 
@@ -652,6 +667,36 @@ export function WhiteVisionClientPortal({
                 )}
               </div>
             )}
+
+            <details className="mt-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/70">
+              <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-slate-200">
+                Ver histórico diário em tabela ({data.historicoDiario.length} dias)
+              </summary>
+              <div className="max-h-96 overflow-auto border-t border-slate-800">
+                <table className="w-full text-left text-sm">
+                  <thead className="sticky top-0 bg-slate-900 text-xs uppercase text-slate-400">
+                    <tr>
+                      <th className="px-4 py-2 font-medium">Data</th>
+                      <th className="px-4 py-2 text-right font-medium">Inserções</th>
+                      <th className="px-4 py-2 text-right font-medium">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/80">
+                    {data.historicoDiario.map((item, index) => (
+                      <tr key={`${item.dia}-${index}`} className="text-slate-300">
+                        <td className="whitespace-nowrap px-4 py-2">{item.dia}</td>
+                        <td className="px-4 py-2 text-right font-mono">
+                          {item.insercoes.toLocaleString("pt-BR")}
+                        </td>
+                        <td className="px-4 py-2 text-right">
+                          {item.status === "desconhecido" ? "Não informado" : item.status}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
 
             {/* NOTA PADRÃO DE TRANSPARÊNCIA (EXATAMENTE COMO REQUISITADO) */}
             <div className="mt-4 p-3.5 rounded-xl bg-slate-950/90 border border-slate-800 text-xs text-slate-300 leading-relaxed flex items-start gap-2.5">

@@ -185,6 +185,7 @@ async function callGroq(
  "telasAtivas":number,"resumoRelatorio":string,
  "desempenhoPorTela":[{"localNome":string,"telaNome":string,"insercoes":number,"detalhes":string}],
  "locais":[{"nome":string,"endereco":string,"horarioFuncionamento":string,
+   "links":[{"rotulo":string,"url":string}],
    "telas":[{"nome":string,"insercoes":number,"detalhes":string,"status":"online"|"offline"|"desconhecido","metaDiariaEsperada":number|null}]}],
  "historicoDiario":[{"dia":"YYYY-MM-DD","insercoes":number,"status":"normal"|"alerta"|"zerado"|"desconhecido",
    "telas":[{"localNome":string,"telaNome":string,"insercoes":number,"pagina":number,"evidencia":string,
@@ -193,9 +194,11 @@ async function callGroq(
 Instruções de extração:
 - "clienteNome": copie o nome exato do cliente que aparece no relatório. Não use o nome do arquivo nem infira.
 - "metaDiaria": copie fielmente o valor numérico explicitamente impresso no relatório. Não estime, calcule, arredonde nem substitua pela média. Se não houver valor explícito, use 0.
-- "telasAtivas": informe o número de telas explicitamente ativas. Em "locais", liste cada local identificado; em cada local, "telas" deve conter cada tela individual pelo nome exato, suas inserções/exibições, detalhes e especificações vinculados quando informados, status e meta por tela quando disponíveis. Copie a meta por tela exatamente como impressa, sem estimar ou calcular; use null se não estiver indicada. Não agrupe nem duplique telas.
+- "locais[].horarioFuncionamento": copie o horário de atendimento/funcionamento exatamente como aparece para cada local. Não combine horários de locais diferentes.
+- "locais[].links": extraia todos os links/URLs explicitamente associados ao local ou relatório, com o rótulo exato quando houver. Não invente, complete nem transforme endereços incompletos em links; se não houver, use lista vazia.
+- "telasAtivas": informe o número de telas explicitamente ativas. Em "locais", liste cada local identificado; em cada local, "telas" deve conter TODAS as telas individuais que constam no PDF, sem limite de quantidade, com nome/identificação exatos, inserções/exibições, detalhes e especificações vinculados, status e meta por tela quando disponíveis. Nunca crie nomes genéricos, agrupe ou duplique telas. Copie a meta por tela exatamente como impressa, sem estimar ou calcular; use null se não estiver indicada.
 - "desempenhoPorTela": inclua cada tela individual com local, nome exato, total exato de inserções do período e detalhes/especificações explícitos. Não invente contagens ausentes; use 0.
-- "historicoDiario": inclua um item por data, com data completa em YYYY-MM-DD e quantidade diária total de inserções. Este histórico alimenta diretamente o gráfico do portal: mantenha todas as datas em ordem cronológica, inclusive dias com zero inserções. Quando houver detalhamento diário por tela, preencha também "telas" com as inserções, nomes, página, evidência e status correspondentes.
+- "historicoDiario": extraia todos os dias exibidos no relatório, normalmente os 30 dias do período. Se o PDF mostrar 30 dias, retorne exatamente as 30 linhas. Inclua um item por data com data completa em YYYY-MM-DD e quantidade diária total de inserções; use o ano indicado pelo período do próprio relatório. Mantenha ordem cronológica e inclua dias zerados somente quando constarem no relatório. Não invente linhas para datas ausentes. Este mesmo histórico é usado no gráfico e na tabela do portal. Quando houver detalhamento diário por tela, preencha também "telas" com inserções, nomes, página, evidência e status correspondentes.
 - Calcule "insercoesPeriodo" somando os valores diários do período, salvo quando o documento declarar explicitamente outro total; não some períodos duplicados. "totalExibicoesHistorico" e "diasEmExibicaoTotal" devem refletir os acumulados declarados no documento, não apenas o período atual.
 - "resumoRelatorio" deve ser factual, incluir o nome exato do cliente e permanecer disponível para exibição no painel do cliente.
 - Use somente informações do PDF. Para valores ausentes, use string vazia, 0, lista vazia, null ou status "desconhecido", conforme o tipo. Não invente datas, telas, locais, valores ou cálculos sem dados suficientes. A saída deve ser JSON puro, parseável diretamente.`;
@@ -342,6 +345,24 @@ Deno.serve(async (request) => {
       metaDiaria: report.metaDiaria,
       telasAtivas: report.telasAtivas,
       desempenhoPorTela: report.desempenhoPorTela,
+      locais: report.locais.map((local: {
+        nome: string;
+        horarioFuncionamento?: string;
+        links?: Array<{ rotulo?: string; url?: string }>;
+      }) => ({
+        nome: local.nome,
+        horarioFuncionamento: local.horarioFuncionamento || "",
+        links: (local.links || []).flatMap((link) => {
+          if (typeof link.url !== "string") return [];
+          try {
+            const parsedUrl = new URL(link.url);
+            if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") return [];
+            return [{ rotulo: link.rotulo || link.url, url: parsedUrl.href }];
+          } catch {
+            return [];
+          }
+        }),
+      })),
       historicoDiario: report.historicoDiario.map((day: { dia: string; insercoes: number; status: string }) => ({
         data: day.dia,
         insercoes: day.insercoes,
