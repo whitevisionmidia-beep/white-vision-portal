@@ -1,3 +1,4 @@
+```tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Trash2,
@@ -53,13 +54,278 @@ import { DEFAULT_CLIENT_THEME } from "../types/whiteVision";
 import { getPublicMediaUrl } from "../lib/supabase";
 
 function formatDia(isoDate: string): string {
-  if (!isoDate || !isoDate.includes("-")) return isoDate || "";
-  const [year, month, day] = isoDate.split("-");
-  return `${day}/${month}/${year}`;
+  if (!isoDate) return "";
+  const cleaned = String(isoDate).trim();
+  if (cleaned.includes("/")) return cleaned;
+  if (cleaned.includes("-")) {
+    const [year, month, day] = cleaned.split("-");
+    return `${day}/${month}/${year}`;
+  }
+  return cleaned;
+}
+
+function normalizeDateStr(d: any): string {
+  if (!d) return "";
+  const s = String(d).trim();
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
+    const [day, month, year] = s.split("/");
+    return `${year}-${month}-${day}`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+    return s.slice(0, 10);
+  }
+  return s;
+}
+
+/**
+ * Extrator profundo de telas a partir do documento do PDF
+ */
+function extractScreensFromReport(
+  rep: any,
+  fallbackMeta: number = 300
+): Array<{ nome: string; metaDiaria: number; pontoNome?: string }> {
+  const screensMap = new Map<string, { nome: string; metaDiaria: number; pontoNome?: string }>();
+
+  if (!rep) return [{ nome: "Painel Principal", metaDiaria: fallbackMeta }];
+
+  // 1. Telas explícitas na raiz do relatório
+  if (Array.isArray(rep.telas)) {
+    for (const t of rep.telas) {
+      if (typeof t === "string" && t.trim()) {
+        screensMap.set(t.trim(), { nome: t.trim(), metaDiaria: fallbackMeta });
+      } else if (t && typeof t === "object") {
+        const nome = String(t.nome || t.tela || t.local || t.screen || "").trim();
+        if (nome) {
+          screensMap.set(nome, {
+            nome,
+            metaDiaria: Number(t.metaDiaria || t.meta || fallbackMeta) || fallbackMeta,
+            pontoNome: t.ponto || t.pontoNome || t.local,
+          });
+        }
+      }
+    }
+  }
+
+  // 2. Telas organizadas por pontos
+  if (Array.isArray(rep.pontos)) {
+    for (const p of rep.pontos) {
+      if (Array.isArray(p?.telas) && p.telas.length > 0) {
+        for (const t of p.telas) {
+          const tNome = typeof t === "string" ? t.trim() : String(t.nome || t.tela || "").trim();
+          if (tNome) {
+            const finalNome = p.nome && !tNome.includes(p.nome) ? `${p.nome} • ${tNome}` : tNome;
+            screensMap.set(finalNome, {
+              nome: finalNome,
+              metaDiaria: Number(t.metaDiaria || t.meta || fallbackMeta) || fallbackMeta,
+              pontoNome: p.nome,
+            });
+          }
+        }
+      } else if (p?.nome) {
+        const pNome = String(p.nome).trim();
+        if (pNome && !screensMap.has(pNome)) {
+          screensMap.set(pNome, {
+            nome: pNome,
+            metaDiaria: Number(p.metaDiaria || p.meta || fallbackMeta) || fallbackMeta,
+            pontoNome: pNome,
+          });
+        }
+      }
+    }
+  }
+
+  // 3. Telas identificadas dentro do histórico diário
+  const historico = rep.historicoDiario || rep.historico || rep.veiculacoesDiarias || [];
+  if (Array.isArray(historico)) {
+    for (const h of historico) {
+      if (Array.isArray(h?.telas)) {
+        for (const ht of h.telas) {
+          const nome = String(typeof ht === "string" ? ht : ht.nome || ht.tela || "").trim();
+          if (nome && !screensMap.has(nome)) {
+            screensMap.set(nome, {
+              nome,
+              metaDiaria: Number(ht.metaDiaria || ht.meta || fallbackMeta) || fallbackMeta,
+            });
+          }
+        }
+      } else if (h?.telas && typeof h.telas === "object") {
+        for (const key of Object.keys(h.telas)) {
+          if (key.trim() && !screensMap.has(key.trim())) {
+            screensMap.set(key.trim(), { nome: key.trim(), metaDiaria: fallbackMeta });
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Tabelas detalhadas por tela
+  const detalhesTelas = rep.detalhesPorTela || rep.tabelasPorTela || rep.exibicoesPorTela;
+  if (detalhesTelas && typeof detalhesTelas === "object" && !Array.isArray(detalhesTelas)) {
+    for (const key of Object.keys(detalhesTelas)) {
+      if (key.trim() && !screensMap.has(key.trim())) {
+        screensMap.set(key.trim(), { nome: key.trim(), metaDiaria: fallbackMeta });
+      }
+    }
+  }
+
+  // Fallback se nenhuma tela foi identificada
+  if (screensMap.size === 0) {
+    const nomePadrao = rep.clienteNome ? `${rep.clienteNome} • Totem Principal` : "Totem Principal";
+    screensMap.set(nomePadrao, { nome: nomePadrao, metaDiaria: fallbackMeta });
+  }
+
+  return Array.from(screensMap.values());
+}
+
+/**
+ * Extrator profundo dos relatórios diários com preenchimento exato por tela e dia
+ */
+function extractDailyReportsFromReport(
+  rep: any,
+  telas: TelaPonto[],
+  fallbackMeta: number
+): RelatorioDiarioTela[] {
+  const resultRows: RelatorioDiarioTela[] = [];
+  const historico = rep?.historicoDiario || rep?.historico || rep?.veiculacoesDiarias || [];
+  const detalhesPorTela = rep?.detalhesPorTela || rep?.tabelasPorTela || rep?.exibicoesPorTela;
+
+  // Mapa: dataIso -> telaId -> dados
+  const matrix = new Map<string, Map<string, { exibicoes: number; meta: number; falha: boolean; obs: string }>>();
+
+  // 1. Extração se o PDF vier indexado por tela
+  if (detalhesPorTela && typeof detalhesPorTela === "object" && !Array.isArray(detalhesPorTela)) {
+    for (const [screenName, diasArray] of Object.entries(detalhesPorTela)) {
+      const matchedTela =
+        telas.find(
+          (t) =>
+            t.nome.toLowerCase() === screenName.toLowerCase() ||
+            t.nome.toLowerCase().includes(screenName.toLowerCase()) ||
+            screenName.toLowerCase().includes(t.nome.toLowerCase())
+        ) || telas[0];
+
+      if (matchedTela && Array.isArray(diasArray)) {
+        for (const d of diasArray) {
+          const dataIso = normalizeDateStr(d?.data);
+          if (!dataIso) continue;
+
+          if (!matrix.has(dataIso)) matrix.set(dataIso, new Map());
+          const screenMap = matrix.get(dataIso)!;
+
+          screenMap.set(matchedTela.id, {
+            exibicoes: Number(d.exibicoes ?? d.insercoes ?? d.total ?? 0),
+            meta: Number(d.meta ?? matchedTela.metaDiaria ?? fallbackMeta) || fallbackMeta,
+            falha: Boolean(d.falha || d.queda),
+            obs: String(d.observacao || d.obs || ""),
+          });
+        }
+      }
+    }
+  }
+
+  // 2. Extração do histórico diário padrão
+  if (Array.isArray(historico)) {
+    for (const h of historico) {
+      const dataIso = normalizeDateStr(h?.data);
+      if (!dataIso) continue;
+
+      if (!matrix.has(dataIso)) matrix.set(dataIso, new Map());
+      const screenMap = matrix.get(dataIso)!;
+
+      const totalDia = Number(h.insercoes ?? h.exibicoes ?? h.total ?? 0);
+      const metaDia = Number(h.meta ?? (fallbackMeta * telas.length));
+      const falhaDia = Boolean(h.falha || h.queda);
+      const obsDia = String(h.observacao || h.obs || "");
+
+      // Caso o dia contenha detalhe em array por tela
+      if (Array.isArray(h.telas)) {
+        for (const ht of h.telas) {
+          const htNome = String(typeof ht === "string" ? ht : ht.nome || ht.tela || "").toLowerCase();
+          const matched = telas.find(
+            (t) =>
+              t.nome.toLowerCase() === htNome ||
+              t.nome.toLowerCase().includes(htNome) ||
+              htNome.includes(t.nome.toLowerCase())
+          );
+          if (matched) {
+            screenMap.set(matched.id, {
+              exibicoes: Number(ht.exibicoes ?? ht.insercoes ?? ht.total ?? 0),
+              meta: Number(ht.meta ?? matched.metaDiaria ?? fallbackMeta) || fallbackMeta,
+              falha: Boolean(ht.falha ?? falhaDia),
+              obs: String(ht.observacao ?? obsDia),
+            });
+          }
+        }
+      } else if (h.telas && typeof h.telas === "object") {
+        for (const [key, val] of Object.entries(h.telas)) {
+          const keyLow = key.toLowerCase();
+          const matched = telas.find(
+            (t) =>
+              t.nome.toLowerCase() === keyLow ||
+              t.nome.toLowerCase().includes(keyLow) ||
+              keyLow.includes(t.nome.toLowerCase())
+          );
+          if (matched) {
+            const numVal =
+              typeof val === "number"
+                ? val
+                : Number((val as any)?.exibicoes ?? (val as any)?.insercoes ?? 0);
+
+            screenMap.set(matched.id, {
+              exibicoes: numVal,
+              meta: Number((val as any)?.meta ?? matched.metaDiaria ?? fallbackMeta) || fallbackMeta,
+              falha: Boolean((val as any)?.falha ?? falhaDia),
+              obs: String((val as any)?.observacao ?? obsDia),
+            });
+          }
+        }
+      }
+
+      // Distribui com precisão para qualquer tela restante do dia
+      const unmapped = telas.filter((t) => !screenMap.has(t.id));
+      if (unmapped.length > 0) {
+        const jaMapeadas = Array.from(screenMap.values()).reduce((sum, v) => sum + v.exibicoes, 0);
+        const restantes = Math.max(0, totalDia - jaMapeadas);
+        const quota = unmapped.length > 0 ? Math.round(restantes / unmapped.length) : 0;
+        const metaQuota = Math.round(metaDia / Math.max(1, telas.length));
+
+        for (const ut of unmapped) {
+          screenMap.set(ut.id, {
+            exibicoes: quota > 0 ? quota : totalDia > 0 ? Math.round(totalDia / telas.length) : 0,
+            meta: ut.metaDiaria || metaQuota || fallbackMeta,
+            falha: falhaDia,
+            obs: obsDia,
+          });
+        }
+      }
+    }
+  }
+
+  // Montagem final completa da lista
+  for (const [dataIso, screenMap] of matrix.entries()) {
+    for (const tela of telas) {
+      const entry = screenMap.get(tela.id) || {
+        exibicoes: 0,
+        meta: tela.metaDiaria || fallbackMeta,
+        falha: false,
+        obs: "",
+      };
+      resultRows.push({
+        id: crypto.randomUUID(),
+        data: dataIso,
+        telaId: tela.id,
+        exibicoesEntregues: entry.exibicoes,
+        metaDiaria: entry.meta ?? tela.metaDiaria ?? fallbackMeta,
+        falhaNominal: entry.falha,
+        statusRelatorio: entry.falha ? "falha" : "sucesso",
+        observacaoFalha: entry.obs,
+      });
+    }
+  }
+
+  return resultRows;
 }
 
 export function AdminPage() {
-  // Estado global do banco e carregamento
   const [db, setDb] = useState<WhiteVisionDb | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -162,13 +428,13 @@ export function AdminPage() {
   };
 
   /**
-   * SELEÇÃO AUTOMÁTICA DO CLIENTE COM ISOLAMENTO TOTAL E CARGA COMPLETA
+   * SELEÇÃO AUTOMÁTICA DO CLIENTE COM ISOLAMENTO TOTAL
    */
   const selectClientForAdmin = async (campaignId: string) => {
     setPdfClientId(campaignId);
     setMediaCampaignId(campaignId);
 
-    // 1. ISOLAMENTO TOTAL: Limpa imediatamente o estado anterior
+    // 1. ISOLAMENTO TOTAL: Descarta estado anterior
     setCampanhaDraft(null);
     setPontosDraft([]);
     setTelasDraft([]);
@@ -184,61 +450,35 @@ export function AdminPage() {
     setError(null);
 
     try {
-      // 2. Busca dados frescos do cliente no Supabase
       const clientData = await fetchClientAdminData(campaignId);
       if (requestId !== clientSelectionRequest.current) return;
 
       const campanha = clientData.campanha;
       const pontos = clientData.pontos || [];
-      const telas = (clientData.telas || []).map((t, idx) => {
-        // Assegura que nomes genéricos sejam substituídos pelo nome do Ponto/Localização real
-        const ponto = pontos.find((p) => p.id === t.pontoId);
-        const nomeReal =
-          t.nome && !t.nome.toLowerCase().startsWith("tela 1")
-            ? t.nome
-            : ponto?.nome
-              ? `${ponto.nome} • Painel`
-              : `Totem ${idx + 1}`;
-        return { ...t, nome: nomeReal };
-      });
+      let telas = clientData.telas || [];
 
-      // 3. Unifica relatórios diários salvos com o histórico agregado da campanha
+      // Se não houver telas cadastradas no banco mas houver no dashboard do PDF
+      if (telas.length === 0 && campanha?.metricasDashboard) {
+        const metaDiariaGeral = Number(campanha.metricasDashboard.metaDiaria || 300);
+        const extracted = extractScreensFromReport(campanha.metricasDashboard, metaDiariaGeral);
+        telas = extracted.map((s, idx) => ({
+          id: crypto.randomUUID(),
+          pontoId: `ponto-${idx}`,
+          nome: s.nome,
+          metaDiaria: s.metaDiaria,
+          status: "online",
+        }));
+      }
+
+      // Constrói os relatórios diários unificando banco e histórico
       let finalRelatorios: RelatorioDiarioTela[] = clientData.relatoriosDiarios || [];
-      const historicoDiario = campanha?.metricasDashboard?.historicoDiario || [];
 
-      if (historicoDiario.length > 0 && telas.length > 0) {
-        const existingKeys = new Set(
-          finalRelatorios.map((r: RelatorioDiarioTela) => `${r.data}_${r.telaId}`)
+      if (finalRelatorios.length === 0 && campanha?.metricasDashboard && telas.length > 0) {
+        finalRelatorios = extractDailyReportsFromReport(
+          campanha.metricasDashboard,
+          telas,
+          Number(campanha.metricasDashboard.metaDiaria || 300)
         );
-        const additionalRows: RelatorioDiarioTela[] = [];
-
-        for (const h of historicoDiario) {
-          if (!h.data) continue;
-          const insercoesNum = Number(h.insercoes || h.exibicoes) || 0;
-          const perScreenExibicoes = Math.round(insercoesNum / Math.max(1, telas.length));
-          const metaNum = Number(h.meta) || Number(campanha?.metricasDashboard?.metaDiaria) || 0;
-          const perScreenMeta = metaNum > 0 ? Math.round(metaNum / Math.max(1, telas.length)) : null;
-
-          for (const tela of telas) {
-            const key = `${h.data}_${tela.id}`;
-            if (!existingKeys.has(key)) {
-              additionalRows.push({
-                id: crypto.randomUUID(),
-                data: h.data,
-                telaId: tela.id,
-                exibicoesEntregues: perScreenExibicoes,
-                metaDiaria: tela.metaDiaria || perScreenMeta,
-                falhaNominal: Boolean(h.falha),
-                statusRelatorio: h.falha ? "falha" : "sucesso",
-                observacaoFalha: h.observacao || "",
-              });
-              existingKeys.add(key);
-            }
-          }
-        }
-        if (additionalRows.length > 0) {
-          finalRelatorios = [...finalRelatorios, ...additionalRows];
-        }
       }
 
       setCampanhaDraft(campanha);
@@ -246,7 +486,6 @@ export function AdminPage() {
       setTelasDraft(telas);
       setRelatoriosDraft(finalRelatorios);
 
-      // Carrega o WhatsApp do tema se disponível
       const themeWhatsapp =
         (campanha.clientTheme as Record<string, unknown>)?.whatsapp ||
         (campanha.clientTheme as Record<string, unknown>)?.whatsappNumber;
@@ -266,15 +505,11 @@ export function AdminPage() {
             ...pontos,
           ],
           telas: [
-            ...previous.telas.filter(
-              (s) => !pontos.some((p) => p.id === s.pontoId)
-            ),
+            ...previous.telas.filter((s) => !pontos.some((p) => p.id === s.pontoId)),
             ...telas,
           ],
           relatoriosDiarios: [
-            ...previous.relatoriosDiarios.filter(
-              (r) => !telas.some((t) => t.id === r.telaId)
-            ),
+            ...previous.relatoriosDiarios.filter((r) => !telas.some((t) => t.id === r.telaId)),
             ...finalRelatorios,
           ],
           relatoriosPdf: [
@@ -287,11 +522,7 @@ export function AdminPage() {
       flash(`Dados de "${campanha.clienteNome}" carregados automaticamente do Supabase.`);
     } catch (err) {
       if (requestId === clientSelectionRequest.current) {
-        setError(
-          `Erro ao carregar dados do cliente: ${
-            err instanceof Error ? err.message : String(err)
-          }`
-        );
+        setError(`Erro ao carregar dados do cliente: ${err instanceof Error ? err.message : String(err)}`);
       }
     } finally {
       if (requestId === clientSelectionRequest.current) {
@@ -344,26 +575,29 @@ export function AdminPage() {
     void load();
   }, []);
 
-  // Datas ordenadas para histórico e tabela (da mais recente para a mais antiga)
+  // Datas ordenadas
   const datasOrdenadas = useMemo(() => {
     const datesSet = new Set<string>();
     relatoriosDraft.forEach((item) => {
-      if (item.data) datesSet.add(item.data);
+      if (item.data) datesSet.add(normalizeDateStr(item.data));
     });
     (campanhaDraft?.metricasDashboard?.historicoDiario || []).forEach((item) => {
-      if (item.data) datesSet.add(item.data);
+      if (item.data) datesSet.add(normalizeDateStr(item.data));
     });
-    return Array.from(datesSet).sort().reverse();
+    return Array.from(datesSet).filter(Boolean).sort().reverse();
   }, [relatoriosDraft, campanhaDraft?.metricasDashboard?.historicoDiario]);
 
-  // DADOS ESTATÍSTICOS DINÂMICOS DO GRÁFICO
+  // CÁLCULO DAS EXIBIÇÕES REAIS DO GRÁFICO
   const dadosGrafico = useMemo(() => {
     if (datasOrdenadas.length === 0) return [];
 
     const datasGraf = [...datasOrdenadas].slice(0, 14).reverse();
 
-    return datasGraf.map((data) => {
-      const registrosDoDia = relatoriosDraft.filter((r) => r.data === data);
+    return datasGraf.map((dataIso) => {
+      const registrosDoDia = relatoriosDraft.filter(
+        (r) => normalizeDateStr(r.data) === dataIso
+      );
+
       let totalEntregue = registrosDoDia.reduce(
         (sum, item) => sum + (Number(item.exibicoesEntregues) || 0),
         0
@@ -374,21 +608,21 @@ export function AdminPage() {
       );
       let teveFalha = registrosDoDia.some((item) => item.falhaNominal);
 
-      // Respaldo no histórico consolidado caso a tela pontual não possua registro individual
-      if (registrosDoDia.length === 0) {
+      // Resgate do histórico consolidado se necessário
+      if (totalEntregue === 0) {
         const historicoItem = campanhaDraft?.metricasDashboard?.historicoDiario?.find(
-          (h) => h.data === data
+          (h) => normalizeDateStr(h.data) === dataIso
         );
         if (historicoItem) {
-          totalEntregue = Number(historicoItem.insercoes || historicoItem.exibicoes) || 0;
-          totalMeta = Number(historicoItem.meta) || Number(campanhaDraft?.metricasDashboard?.metaDiaria) || 0;
+          totalEntregue = Number(historicoItem.insercoes || historicoItem.exibicoes || historicoItem.total || 0);
+          totalMeta = Number(historicoItem.meta || campanhaDraft?.metricasDashboard?.metaDiaria || 0);
           teveFalha = Boolean(historicoItem.falha);
         }
       }
 
       return {
-        data,
-        diaFormatado: formatDia(data).slice(0, 5),
+        data: dataIso,
+        diaFormatado: formatDia(dataIso).slice(0, 5),
         totalEntregue,
         totalMeta,
         teveFalha,
@@ -404,6 +638,34 @@ export function AdminPage() {
     return Math.max(10, Math.ceil(maxVal * 1.15));
   }, [dadosGrafico]);
 
+  const totalGeralEntregue = useMemo(() => {
+    const sumDraft = relatoriosDraft.reduce(
+      (sum, item) => sum + (Number(item.exibicoesEntregues) || 0),
+      0
+    );
+    if (sumDraft > 0) return sumDraft;
+    return Number(
+      campanhaDraft?.metricasDashboard?.insercoesPeriodo ||
+      campanhaDraft?.totalExibicoesAcumuladas ||
+      importedReport?.totals?.totalExibicoesPeriodo ||
+      0
+    );
+  }, [relatoriosDraft, campanhaDraft, importedReport]);
+
+  const totalMetaAuditada = useMemo(() => {
+    const sumDraft = relatoriosDraft.reduce(
+      (sum, item) => sum + (Number(item.metaDiaria) || 0),
+      0
+    );
+    if (sumDraft > 0) return sumDraft;
+    const metaDiaria = Number(
+      campanhaDraft?.metricasDashboard?.metaDiaria ||
+      importedReport?.totals?.metaDiaria ||
+      300
+    );
+    return metaDiaria * Math.max(1, datasOrdenadas.length);
+  }, [relatoriosDraft, campanhaDraft, importedReport, datasOrdenadas]);
+
   const handleCopyClientLink = async (slug: string) => {
     const link = `${window.location.origin}/c/${encodeURIComponent(slug)}`;
     try {
@@ -414,7 +676,6 @@ export function AdminPage() {
     }
   };
 
-  // SALVAR WHATSAPP OFICIAL DO ADMIN NO SUPABASE
   const handleSaveWhatsapp = async () => {
     const cleaned = tempWhatsapp.replace(/\D/g, "");
     if (cleaned.length < 10) {
@@ -427,7 +688,6 @@ export function AdminPage() {
       setAdminWhatsapp(cleaned);
       localStorage.setItem("whitevision_admin_whatsapp", cleaned);
 
-      // Atualiza a campanha selecionada no Supabase
       if (campanhaDraft) {
         const payload = await saveCampanha(campanhaDraft.id, {
           status: campanhaDraft.status,
@@ -461,7 +721,6 @@ export function AdminPage() {
     }
   };
 
-  // Edição rápida de cliente na lista
   const handleSaveClientQuickEdit = async () => {
     if (!editingClientModal) return;
     setSaving(true);
@@ -488,7 +747,6 @@ export function AdminPage() {
     }
   };
 
-  // Salvar perfil da campanha (cores, tema, nome)
   const handleSaveCampanha = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!campanhaDraft) return;
@@ -519,7 +777,6 @@ export function AdminPage() {
     }
   };
 
-  // Salvar metas individuais das telas
   const handleSaveMetas = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!campanhaDraft || telasDraft.length === 0) return;
@@ -544,9 +801,6 @@ export function AdminPage() {
     }
   };
 
-  /**
-   * BOTÃO PRINCIPAL DE SALVAR HISTÓRICO DIÁRIO
-   */
   const handleSaveRelatorios = async () => {
     if (!campanhaDraft) {
       setError("Selecione um cliente antes de salvar os relatórios diários.");
@@ -594,11 +848,7 @@ export function AdminPage() {
 
       flash("Salvo com sucesso! Todos os relatórios diários e metas foram gravados no Supabase.");
     } catch (err) {
-      setError(
-        `Erro ao salvar relatórios no Supabase: ${
-          err instanceof Error ? err.message : String(err)
-        }`
-      );
+      setError(`Erro ao salvar relatórios no Supabase: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSaving(false);
     }
@@ -627,7 +877,7 @@ export function AdminPage() {
     }
 
     const existingScreenIdsForDate = new Set(
-      relatoriosDraft.filter((item) => item.data === newReportDate).map((item) => item.telaId)
+      relatoriosDraft.filter((item) => normalizeDateStr(item.data) === newReportDate).map((item) => item.telaId)
     );
 
     const newRows: RelatorioDiarioTela[] = telasDraft
@@ -650,7 +900,7 @@ export function AdminPage() {
 
     setError(null);
     setRelatoriosDraft((prev) => [...prev, ...newRows]);
-    flash(`Dia ${formatDia(newReportDate)} adicionado. Clique no botão verde 'Salvar Relatórios Diários' para gravar.`);
+    flash(`Dia ${formatDia(newReportDate)} adicionado. Clique em 'Salvar Relatórios Diários' para gravar.`);
   };
 
   const handleDeleteDailyReport = async (report: RelatorioDiarioTela) => {
@@ -675,17 +925,9 @@ export function AdminPage() {
     if (!campanhaDraft) return;
     setError(null);
 
-    const totalInsercoes = relatoriosDraft.reduce(
-      (sum, item) => sum + (Number(item.exibicoesEntregues) || 0),
-      0
-    );
-
-    const totalMetas = relatoriosDraft.reduce(
-      (sum, item) => sum + (Number(item.metaDiaria) || 0),
-      0
-    );
-
-    const diasUnicos = new Set(relatoriosDraft.map((item) => item.data)).size;
+    const totalInsercoes = totalGeralEntregue;
+    const totalMetas = totalMetaAuditada;
+    const diasUnicos = datasOrdenadas.length;
     const telasAtivas = telasDraft.filter((tela) => tela.status === "online").length;
     const falhasRegistradas = relatoriosDraft.filter((item) => item.falhaNominal).length;
 
@@ -757,6 +999,9 @@ export function AdminPage() {
     }
   };
 
+  /**
+   * PROCESSAMENTO COM LIMPEZA, EXTRAÇÃO DINÂMICA DE TELAS E DIAS DO PDF
+   */
   const handleImportPdf = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!reportPdf || !pdfClientId) {
@@ -766,10 +1011,65 @@ export function AdminPage() {
     setImportingPdf(true);
     setError(null);
     setImportedReport(null);
+
+    // 1. LIMPEZA TOTAL IMEDIATA: descarta telas antigas ou registros da memória
+    setTelasDraft([]);
+    setRelatoriosDraft([]);
+    setPontosDraft([]);
+
     try {
       const result = await importPdfReport(reportPdf, pdfClientId);
       applyDb(result.db);
+
+      // 2. Extrai automaticamente todas as telas reais do PDF
+      const metaDiariaGeral = Number(
+        result.totals?.metaDiaria || (result.report as any)?.metaDiaria || 300
+      );
+      const extractedScreens = extractScreensFromReport(result.report, metaDiariaGeral);
+
+      const freshTelas: TelaPonto[] = extractedScreens.map((s, idx) => ({
+        id: crypto.randomUUID(),
+        pontoId: s.pontoNome ? `ponto-${idx}` : `ponto-principal`,
+        nome: s.nome,
+        metaDiaria: s.metaDiaria,
+        status: "online",
+      }));
+
+      const freshPontos: Ponto[] = extractedScreens.map((s, idx) => ({
+        id: s.pontoNome ? `ponto-${idx}` : `ponto-principal`,
+        campanhaId: result.campaignId,
+        nome: s.pontoNome || s.nome,
+        cidade: "São Paulo",
+      }));
+
+      // 3. Preenche automaticamente as exibições por tela e dia extraídas do PDF
+      const freshRelatorios = extractDailyReportsFromReport(
+        result.report,
+        freshTelas,
+        metaDiariaGeral
+      );
+
+      // 4. Injeta imediatamente no estado para atualização dos componentes visuais
+      setPontosDraft(freshPontos);
+      setTelasDraft(freshTelas);
+      setRelatoriosDraft(freshRelatorios);
+
+      // 5. Grava as telas e relatórios extraídos no Supabase
+      try {
+        for (const tela of freshTelas) {
+          await saveTela(tela.id, {
+            nome: tela.nome,
+            metaDiaria: tela.metaDiaria,
+            status: tela.status,
+          });
+        }
+        await saveRelatorios(result.campaignId, freshRelatorios);
+      } catch (saveErr) {
+        console.warn("Aviso ao persistir dados extraídos do PDF:", saveErr);
+      }
+
       await selectClientForAdmin(result.campaignId);
+
       setImportedReport({
         uploadId: result.uploadId,
         clientPath: result.clientPath,
@@ -777,13 +1077,17 @@ export function AdminPage() {
         report: result.report,
         totals: result.totals,
       });
+
       setProfileSavedLink({
         clientName: result.clientName,
         clientPath: result.clientPath,
       });
+
       setReportPdf(null);
       if (pdfInputRef.current) pdfInputRef.current.value = "";
-      flash(`Relatório processado e salvo no perfil de ${result.clientName}!`);
+      flash(
+        `PDF processado com sucesso! ${freshTelas.length} telas detectadas e ${freshRelatorios.length} registros diários sincronizados.`
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof PdfImportError && err.pdfSaved) {
@@ -1101,7 +1405,7 @@ export function AdminPage() {
           </div>
         </section>
 
-        {/* 2. CONFIGURAÇÃO DO WHATSAPP DO ADMIN COM EDITAR E SALVAR */}
+        {/* 2. CONFIGURAÇÃO DO WHATSAPP DO ADMIN */}
         <section className="rounded-2xl border border-emerald-500/30 bg-slate-900/90 p-5 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div className="space-y-1">
@@ -1173,7 +1477,7 @@ export function AdminPage() {
           )}
         </section>
 
-        {/* 3. GRÁFICO AUTOMÁTICO DE VEICULAÇÃO / DESEMPENHO */}
+        {/* 3. GRÁFICO AUTOMÁTICO DE VEICULAÇÃO / DESEMPENHO REAL */}
         {campanhaDraft && (
           <section className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-800 pb-3">
@@ -1207,21 +1511,13 @@ export function AdminPage() {
               <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800">
                 <span className="text-slate-400 block">Total de Entregas</span>
                 <span className="text-base font-bold text-emerald-400">
-                  {relatoriosDraft.length > 0
-                    ? relatoriosDraft
-                        .reduce((sum, item) => sum + (Number(item.exibicoesEntregues) || 0), 0)
-                        .toLocaleString("pt-BR")
-                    : (campanhaDraft?.metricasDashboard?.insercoesPeriodo || campanhaDraft?.totalExibicoesAcumuladas || 0).toLocaleString("pt-BR")}
+                  {totalGeralEntregue.toLocaleString("pt-BR")}
                 </span>
               </div>
               <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800">
                 <span className="text-slate-400 block">Meta Total Auditada</span>
                 <span className="text-base font-bold text-sky-400">
-                  {relatoriosDraft.length > 0
-                    ? relatoriosDraft
-                        .reduce((sum, item) => sum + (Number(item.metaDiaria) || 0), 0)
-                        .toLocaleString("pt-BR")
-                    : (campanhaDraft?.metricasDashboard?.metaDiaria || 0).toLocaleString("pt-BR")}
+                  {totalMetaAuditada.toLocaleString("pt-BR")}
                 </span>
               </div>
               <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800">
@@ -1247,8 +1543,14 @@ export function AdminPage() {
               <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-800 space-y-2">
                 <div className="h-44 flex items-end gap-2 sm:gap-3 justify-between pt-6 px-2">
                   {dadosGrafico.map((d) => {
-                    const alturaEntregue = Math.min(100, Math.round((d.totalEntregue / maximoGrafico) * 100));
-                    const alturaMeta = Math.min(100, Math.round((d.totalMeta / maximoGrafico) * 100));
+                    const alturaEntregue = Math.min(
+                      100,
+                      Math.max(d.totalEntregue > 0 ? 5 : 0, Math.round((d.totalEntregue / maximoGrafico) * 100))
+                    );
+                    const alturaMeta = Math.min(
+                      100,
+                      Math.max(d.totalMeta > 0 ? 5 : 0, Math.round((d.totalMeta / maximoGrafico) * 100))
+                    );
 
                     return (
                       <div key={d.data} className="flex-1 flex flex-col items-center h-full justify-end group relative">
@@ -1305,7 +1607,7 @@ export function AdminPage() {
                 </p>
               </div>
 
-              {/* BOTÃO DE SALVAR RELATÓRIOS (ONCLICK DIRETO AO SUPABASE) */}
+              {/* BOTÃO DE SALVAR RELATÓRIOS */}
               <button
                 type="button"
                 onClick={() => void handleSaveRelatorios()}
@@ -1383,19 +1685,19 @@ export function AdminPage() {
                       </td>
                     </tr>
                   )}
-                  {datasOrdenadas.map((data) => (
-                    <tr key={data} className="hover:bg-slate-900/40">
+                  {datasOrdenadas.map((dataIso) => (
+                    <tr key={dataIso} className="hover:bg-slate-900/40">
                       <td className="py-2.5 px-3 whitespace-nowrap font-mono text-xs font-bold text-slate-300">
-                        {formatDia(data)}
+                        {formatDia(dataIso)}
                       </td>
                       {telasDraft.map((tela) => {
                         const relatorio = relatoriosDraft.find(
-                          (item) => item.telaId === tela.id && item.data === data
+                          (item) => item.telaId === tela.id && normalizeDateStr(item.data) === dataIso
                         );
 
                         if (!relatorio) {
                           return (
-                            <td key={`${tela.id}-${data}-vazio`} colSpan={5} className="py-2 px-3 text-xs text-slate-500 border-l border-slate-800">
+                            <td key={`${tela.id}-${dataIso}-vazio`} colSpan={5} className="py-2 px-3 text-xs text-slate-500 border-l border-slate-800">
                               <div className="flex items-center gap-2">
                                 <span>Sem dados</span>
                                 <button
@@ -1405,7 +1707,7 @@ export function AdminPage() {
                                       ...prev,
                                       {
                                         id: crypto.randomUUID(),
-                                        data,
+                                        data: dataIso,
                                         telaId: tela.id,
                                         exibicoesEntregues: 0,
                                         metaDiaria: tela.metaDiaria,
@@ -1425,14 +1727,14 @@ export function AdminPage() {
                         }
 
                         return (
-                          <React.Fragment key={`${tela.id}-${data}`}>
+                          <React.Fragment key={`${tela.id}-${dataIso}`}>
                             <td className="py-2 px-2 border-l border-slate-800">
                               <input
                                 type="number"
                                 min={0}
                                 value={relatorio.metaDiaria ?? ""}
                                 onChange={(e) =>
-                                  updateRelatorio(tela.id, data, {
+                                  updateRelatorio(tela.id, relatorio.data, {
                                     metaDiaria: e.target.value === "" ? null : Number(e.target.value),
                                   })
                                 }
@@ -1445,7 +1747,7 @@ export function AdminPage() {
                                 min={0}
                                 value={relatorio.exibicoesEntregues}
                                 onChange={(e) =>
-                                  updateRelatorio(tela.id, data, {
+                                  updateRelatorio(tela.id, relatorio.data, {
                                     exibicoesEntregues: Math.max(0, Number(e.target.value) || 0),
                                   })
                                 }
@@ -1457,7 +1759,7 @@ export function AdminPage() {
                                 type="checkbox"
                                 checked={relatorio.falhaNominal}
                                 onChange={(e) =>
-                                  updateRelatorio(tela.id, data, {
+                                  updateRelatorio(tela.id, relatorio.data, {
                                     falhaNominal: e.target.checked,
                                   })
                                 }
@@ -1470,7 +1772,7 @@ export function AdminPage() {
                                 placeholder="Motivo da falha ou queda"
                                 value={relatorio.observacaoFalha || ""}
                                 onChange={(e) =>
-                                  updateRelatorio(tela.id, data, {
+                                  updateRelatorio(tela.id, relatorio.data, {
                                     observacaoFalha: e.target.value,
                                   })
                                 }
@@ -1518,7 +1820,7 @@ export function AdminPage() {
           </section>
         )}
 
-        {/* 5. METAS INDIVIDUAIS POR TELA COM IDENTIFICAÇÃO REAL */}
+        {/* 5. METAS INDIVIDUAIS POR TELA */}
         {campanhaDraft && (
           <form
             onSubmit={handleSaveMetas}
@@ -2215,3 +2517,4 @@ export function AdminPage() {
 }
 
 export default AdminPage;
+```
