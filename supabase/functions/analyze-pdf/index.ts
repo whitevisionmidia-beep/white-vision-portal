@@ -199,14 +199,14 @@ Use somente informações explícitas do documento. Para campos ausentes, use st
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-120b",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: pdfText },
       ],
       response_format: { type: "json_object" },
       temperature: 0.1,
-      max_tokens: 8192,
+      max_completion_tokens: 8192,
     }),
   });
 
@@ -441,9 +441,12 @@ Deno.serve(async (request) => {
     }
     const status = /autenticação|sessão|acesso/i.test(message)
       ? 401
+      : error instanceof GroqResponseError
+      ? 502
       : 500;
     return jsonResponse({
       error: message,
+      ...(error instanceof GroqResponseError ? { upstreamStatus: error.status } : {}),
       code: error instanceof JsonParseError
         ? "INVALID_GROQ_JSON"
         : error instanceof GroqResponseError

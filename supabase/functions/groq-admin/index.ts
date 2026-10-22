@@ -3,7 +3,7 @@ import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 
 const keyName = "groq_api_key";
 const groqEndpoint = "https://api.groq.com/openai/v1/chat/completions";
-const model = "llama-3.3-70b-versatile";
+const model = "openai/gpt-oss-120b";
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -19,13 +19,13 @@ Deno.serve(async (request) => {
       .maybeSingle();
     if (error) throw error;
 
-    const environmentKey = Deno.env.get("GROQ_API_KEY")?.trim();
     const storedKey = stored?.secret_value?.trim();
-    const apiKey = storedKey || environmentKey;
+    const environmentKey = Deno.env.get("GROQ_API_KEY")?.trim();
+    const apiKey = environmentKey || storedKey;
 
     if (body?.action === "status") {
       return jsonResponse({
-        status: storedKey ? "portal" : environmentKey ? "ambiente" : "ausente",
+        status: environmentKey ? "ambiente" : storedKey ? "portal" : "ausente",
       });
     }
 
@@ -57,7 +57,7 @@ Deno.serve(async (request) => {
           messages: [
             { role: "user", content: "Responda apenas: OK" },
           ],
-          max_tokens: 8,
+          max_completion_tokens: 32,
         }),
       });
       if (!response.ok) {
