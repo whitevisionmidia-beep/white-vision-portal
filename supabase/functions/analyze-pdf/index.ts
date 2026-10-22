@@ -261,8 +261,10 @@ Deno.serve(async (request) => {
       .from("report-pdfs")
       .download(upload.storage_path);
     if (fileError || !file) throw fileError || new Error("Arquivo PDF não encontrado.");
-    const apiKey = Deno.env.get("GROQ_API_KEY");
-    if (!apiKey) throw new Error("Configure a secret GROQ_API_KEY na Edge Function.");
+    const apiKey = Deno.env.get("GROQ_API_KEY")?.trim();
+    if (!apiKey) {
+      throw new Error("GROQ_API_KEY não encontrada ou vazia nas secrets da Edge Function.");
+    }
     const action = body.action === "summarize" ? "summarize" : "analyze";
     const pdfText = await extractPdfText(file);
     const generated = await callGroq(apiKey, pdfText, action);
