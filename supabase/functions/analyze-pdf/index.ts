@@ -261,13 +261,17 @@ Deno.serve(async (request) => {
       .from("report-pdfs")
       .download(upload.storage_path);
     if (fileError || !file) throw fileError || new Error("Arquivo PDF não encontrado.");
-    const { data: storedGroqKey, error: groqKeyError } = await serviceClient
-      .from("private_settings")
-      .select("secret_value")
-      .eq("setting_key", "groq_api_key")
-      .maybeSingle();
-    if (groqKeyError) throw groqKeyError;
-    const apiKey = storedGroqKey?.secret_value?.trim() || Deno.env.get("GROQ_API_KEY")?.trim();
+    const environmentKey = Deno.env.get("GROQ_API_KEY")?.trim();
+    let apiKey = environmentKey;
+    if (!apiKey) {
+      const { data: storedGroqKey, error: groqKeyError } = await serviceClient
+        .from("private_settings")
+        .select("secret_value")
+        .eq("setting_key", "groq_api_key")
+        .maybeSingle();
+      if (groqKeyError) throw groqKeyError;
+      apiKey = storedGroqKey?.secret_value?.trim();
+    }
     if (!apiKey) {
       throw new Error("Configure a chave Groq no painel administrativo ou como secret GROQ_API_KEY.");
     }
