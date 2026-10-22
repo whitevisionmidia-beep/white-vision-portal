@@ -177,7 +177,7 @@ async function callGroq(
 ) {
   const systemPrompt = action === "summarize"
     ? `Leia o texto extraído do PDF e retorne um objeto JSON válido neste formato: {"resumoIA":"resumo executivo curto e factual em português"}. Não invente informações.`
-    : `Analise o texto extraído do relatório de mídia indoor e retorne exatamente um objeto JSON válido com esta estrutura:
+    : `Você extrai dados de relatórios de mídia indoor. Analise todo o texto do PDF e retorne APENAS um objeto JSON válido, sem Markdown, cercas de código ou explicações. Use exatamente estas chaves e tipos, compatíveis com a tela e o gráfico do portal:
 {
  "token":string,"clienteNome":string,"campanhaNome":string,"periodo":string,
  "diasEmExibicaoTotal":number,"totalExibicoesHistorico":number,
@@ -190,7 +190,16 @@ async function callGroq(
    "telas":[{"localNome":string,"telaNome":string,"insercoes":number,"pagina":number,"evidencia":string,
    "status":"normal"|"alerta"|"zerado"|"desconhecido","observacaoFalha":string}]}]
 }
-Use somente informações explícitas do documento. Para campos ausentes, use string vazia, zero, lista vazia, null ou status desconhecido. Não invente valores. Preserve a unidade da frequência de loop. Meta diária: use o valor explícito ou, se ausente, calcule inserções do período dividido pelo número de dias no histórico. O resumo deve incluir o nome do cliente.`;
+Instruções de extração:
+- "clienteNome": copie o nome exato do cliente que aparece no relatório. Não use o nome do arquivo nem infira.
+- "metaDiaria": use a meta diária numérica explicitamente informada. Se ausente, calcule insercoesPeriodo dividido pelos dias cobertos no histórico; se não houver base suficiente, use 0.
+- "frequenciaLoop": identifique a duração do loop/ciclo e a quantidade de inserções por ciclo quando ambas estiverem explícitas. Calcule a cadência com conversão correta de unidades e descreva, por exemplo, "1 inserção a cada N minutos/segundos" ou "N inserções por ciclo de X minutos". Se faltar dado para calcular, preserve a frequência textual explícita do documento; se também estiver ausente, use string vazia. Nunca estime nem invente.
+- "telasAtivas": informe o número de telas explicitamente ativas. Em "locais", liste cada local identificado, incluindo os dois locais distintos quando ambos aparecerem; em cada local, "telas" deve conter os nomes exatos das telas, o status e a meta diária por tela quando informados. Não duplique telas para atingir uma quantidade esperada.
+- "historicoDiario": inclua um item por data, com data completa em YYYY-MM-DD e quantidade diária total de inserções. Este histórico alimenta diretamente o gráfico do portal: mantenha todas as datas em ordem cronológica, inclusive dias com zero inserções. Quando houver detalhamento diário por tela, preencha também "telas" com as inserções, nomes, página, evidência e status correspondentes.
+- "desempenhoPorTela": use os mesmos nomes de local e tela e as inserções correspondentes, quando disponíveis.
+- Calcule "insercoesPeriodo" somando os valores diários do período, salvo quando o documento declarar explicitamente outro total; não some períodos duplicados. "totalExibicoesHistorico" e "diasEmExibicaoTotal" devem refletir os acumulados declarados no documento, não apenas o período atual.
+- "frequenciaGeral" deve preservar a frequência geral explicitamente informada. "resumoRelatorio" deve ser factual e mencionar o cliente.
+- Use somente informações do PDF. Para valores ausentes, use string vazia, 0, lista vazia, null ou status "desconhecido", conforme o tipo. Não invente datas, telas, locais, valores ou cálculos sem dados suficientes. A saída deve ser JSON puro, parseável diretamente.`;
 
   const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
