@@ -90,7 +90,7 @@ export function AdminPage() {
     report: RelatorioData;
     totals: {
       totalExibicoesPeriodo: number;
-      mediaDiariaPeriodo: number;
+      metaDiaria: number;
       diasEmExibicaoTotal: number;
       totalExibicoesHistorico: number;
     };
@@ -422,23 +422,16 @@ export function AdminPage() {
     const totalInsercoes =
       metrics?.insercoesPeriodo ??
       relatoriosDaCampanha.reduce((total, item) => total + item.exibicoesEntregues, 0);
-    const diasNoPeriodo =
-      metrics?.historicoDiario?.length || datas.length;
-    const mediaDiaria =
-      metrics?.metaDiaria ??
-      (diasNoPeriodo > 0 ? Math.round(totalInsercoes / diasNoPeriodo) : null);
+    const metaDiaria = metrics?.metaDiaria ?? null;
     const telasAtivas =
       metrics?.telasAtivas ??
       telasDaCampanha.filter((tela) => tela.status === "online").length;
-    const frequencia =
-      campanhaDraft.frequenciaGeral.trim() ||
-      "frequência contínua conforme o plano contratado";
-    const mediaTexto =
-      mediaDiaria !== null && mediaDiaria > 0
-        ? `${mediaDiaria.toLocaleString("pt-BR")} inserções diárias`
-        : "média diária não informada";
+    const metaDiariaTexto =
+      metaDiaria !== null && metaDiaria > 0
+        ? `meta diária de ${metaDiaria.toLocaleString("pt-BR")} inserções`
+        : "meta diária não informada no relatório";
     setSummary(
-      `No período auditado, a campanha registrou um total de ${totalInsercoes.toLocaleString("pt-BR")} exibições distribuídas em ${telasAtivas} telas ativas, alcançando ${mediaTexto}. O conteúdo segue veiculado com frequência ${frequencia}.`
+      `No período auditado, a campanha registrou um total de ${totalInsercoes.toLocaleString("pt-BR")} exibições distribuídas em ${telasAtivas} telas ativas. ${metaDiariaTexto}.`
     );
   };
 
@@ -979,8 +972,10 @@ export function AdminPage() {
                   <dd className="font-semibold">{importedReport.totals.totalExibicoesPeriodo.toLocaleString("pt-BR")}</dd>
                 </div>
                 <div>
-                  <dt className="text-xs text-slate-400">Média diária</dt>
-                  <dd className="font-semibold">{importedReport.totals.mediaDiariaPeriodo.toLocaleString("pt-BR")}</dd>
+                  <dt className="text-xs text-slate-400">Meta diária (relatório)</dt>
+                  <dd className="font-semibold">{importedReport.totals.metaDiaria > 0
+                    ? importedReport.totals.metaDiaria.toLocaleString("pt-BR")
+                    : "Não informada"}</dd>
                 </div>
                 <div>
                   <dt className="text-xs text-slate-400">Dias acumulados</dt>

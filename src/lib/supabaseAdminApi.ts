@@ -263,7 +263,7 @@ type PdfResult = {
   report: RelatorioData;
   totals: {
     totalExibicoesPeriodo: number;
-    mediaDiariaPeriodo: number;
+    metaDiaria: number;
     diasEmExibicaoTotal: number;
     totalExibicoesHistorico: number;
   };
@@ -369,7 +369,7 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
   const dashboardPerformance = new Map(
     (metrics.desempenhoPorTela || []).map((item) => [
       `${normalizeName(item.localNome)}::${normalizeName(item.telaNome)}`,
-      item.insercoes,
+      item,
     ])
   );
   const dates = [
@@ -380,8 +380,11 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
   const locais = points.map((point) => {
     const pointScreens = screens.filter((screen) => screen.pontoId === point.id);
     const mappedScreens = pointScreens.map((screen) => {
+      const screenPerformance = dashboardPerformance.get(
+        `${normalizeName(point.nome)}::${normalizeName(screen.nome)}`
+      );
       const total =
-        dashboardPerformance.get(`${normalizeName(point.nome)}::${normalizeName(screen.nome)}`) ??
+        screenPerformance?.insercoes ??
         daily
           .filter((item) => item.telaId === screen.id)
           .reduce((sum, item) => sum + item.exibicoesEntregues, 0);
@@ -391,6 +394,7 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
         id: screen.id,
         nome: screen.nome,
         exibicoes: total,
+        detalhes: screenPerformance?.detalhes,
         mediaDiaria: dates.length ? Math.round(total / dates.length) : 0,
         metaDiariaEsperada: screen.metaDiaria,
         status: screen.status,
@@ -403,7 +407,6 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
       endereco: point.endereco,
       horarioFuncionamento: point.horarioFuncionamento,
       totalExibicoes: mappedScreens.reduce((sum, item) => sum + item.exibicoes, 0),
-      frequenciaLocal: point.frequenciaLocal,
       telas: mappedScreens,
     };
   });
@@ -424,9 +427,7 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
         }));
   const totalPeriodo =
     metrics.insercoesPeriodo ?? historicoDiario.reduce((sum, item) => sum + item.insercoes, 0);
-  const metaDiaria = metrics.metaDiaria ?? (historicoDiario.length
-    ? Math.round(totalPeriodo / historicoDiario.length)
-    : 0);
+  const metaDiaria = metrics.metaDiaria ?? 0;
 
   return {
     report: {
@@ -439,18 +440,16 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
       totalExibicoesHistorico: campaign.totalExibicoesAcumuladas,
       totalExibicoesPeriodo: totalPeriodo,
       insercoesPeriodo: totalPeriodo,
-      mediaDiariaPeriodo: metaDiaria,
       metaDiaria,
-      frequenciaGeral: campaign.frequenciaGeral || "Não informado",
-      frequenciaLoop: campaign.frequenciaGeral,
       clientTheme: { ...DEFAULT_CLIENT_THEME, ...campaign.clientTheme },
       resumoRelatorio: campaign.resumoRelatorio,
       telasAtivas: metrics.telasAtivas ?? screens.filter((screen) => screen.status === "online").length,
-      desempenhoPorTela: metrics.desempenhoPorTela || locais.flatMap((local) =>
+      desempenhoPorTela: metrics.desempenhoPorTela?.length ? metrics.desempenhoPorTela : locais.flatMap((local) =>
         local.telas.map((screen) => ({
           localNome: local.nome,
           telaNome: screen.nome,
           insercoes: screen.exibicoes,
+          detalhes: screen.detalhes,
         }))
       ),
       locais,
@@ -630,6 +629,6 @@ export async function generateReportSummary(campaignId: string): Promise<{ resum
   const campaign = await getSupabase().from("campaigns").select("*").eq("id", campaignId).single();
   const row = unwrap(campaign) as Row;
   const metrics = (row.dashboard_metrics || {}) as CampanhaCliente["metricasDashboard"];
-  const summary = `No período ${String(row.period || "auditado")}, a campanha ${String(row.campaign_name)} registrou ${Number(metrics?.insercoesPeriodo || 0).toLocaleString("pt-BR")} inserções em ${Number(metrics?.telasAtivas || 0)} telas. Frequência do loop: ${String(row.general_frequency || "não informada")}.`;
+  const summary = `No período ${String(row.period || "auditado")}, a campanha ${String(row.campaign_name)} registrou ${Number(metrics?.insercoesPeriodo || 0).toLocaleString("pt-BR")} inserções em ${Number(metrics?.telasAtivas || 0)} telas.`;
   return { resumo: summary };
 }

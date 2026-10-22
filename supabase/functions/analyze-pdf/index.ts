@@ -181,24 +181,23 @@ async function callGroq(
 {
  "token":string,"clienteNome":string,"campanhaNome":string,"periodo":string,
  "diasEmExibicaoTotal":number,"totalExibicoesHistorico":number,
- "insercoesPeriodo":number,"metaDiaria":number,"frequenciaLoop":string,
- "telasAtivas":number,"resumoRelatorio":string,"frequenciaGeral":string,
- "desempenhoPorTela":[{"localNome":string,"telaNome":string,"insercoes":number}],
- "locais":[{"nome":string,"endereco":string,"horarioFuncionamento":string,"frequenciaLocal":string,
-   "telas":[{"nome":string,"status":"online"|"offline"|"desconhecido","metaDiariaEsperada":number|null}]}],
+ "insercoesPeriodo":number,"metaDiaria":number,
+ "telasAtivas":number,"resumoRelatorio":string,
+ "desempenhoPorTela":[{"localNome":string,"telaNome":string,"insercoes":number,"detalhes":string}],
+ "locais":[{"nome":string,"endereco":string,"horarioFuncionamento":string,
+   "telas":[{"nome":string,"insercoes":number,"detalhes":string,"status":"online"|"offline"|"desconhecido","metaDiariaEsperada":number|null}]}],
  "historicoDiario":[{"dia":"YYYY-MM-DD","insercoes":number,"status":"normal"|"alerta"|"zerado"|"desconhecido",
    "telas":[{"localNome":string,"telaNome":string,"insercoes":number,"pagina":number,"evidencia":string,
    "status":"normal"|"alerta"|"zerado"|"desconhecido","observacaoFalha":string}]}]
 }
 Instruções de extração:
 - "clienteNome": copie o nome exato do cliente que aparece no relatório. Não use o nome do arquivo nem infira.
-- "metaDiaria": use a meta diária numérica explicitamente informada. Se ausente, calcule insercoesPeriodo dividido pelos dias cobertos no histórico; se não houver base suficiente, use 0.
-- "frequenciaLoop": identifique a duração do loop/ciclo e a quantidade de inserções por ciclo quando ambas estiverem explícitas. Calcule a cadência com conversão correta de unidades e descreva, por exemplo, "1 inserção a cada N minutos/segundos" ou "N inserções por ciclo de X minutos". Se faltar dado para calcular, preserve a frequência textual explícita do documento; se também estiver ausente, use string vazia. Nunca estime nem invente.
-- "telasAtivas": informe o número de telas explicitamente ativas. Em "locais", liste cada local identificado, incluindo os dois locais distintos quando ambos aparecerem; em cada local, "telas" deve conter os nomes exatos das telas, o status e a meta diária por tela quando informados. Não duplique telas para atingir uma quantidade esperada.
+- "metaDiaria": copie fielmente o valor numérico explicitamente impresso no relatório. Não estime, calcule, arredonde nem substitua pela média. Se não houver valor explícito, use 0.
+- "telasAtivas": informe o número de telas explicitamente ativas. Em "locais", liste cada local identificado; em cada local, "telas" deve conter cada tela individual pelo nome exato, suas inserções/exibições, detalhes e especificações vinculados quando informados, status e meta por tela quando disponíveis. Copie a meta por tela exatamente como impressa, sem estimar ou calcular; use null se não estiver indicada. Não agrupe nem duplique telas.
+- "desempenhoPorTela": inclua cada tela individual com local, nome exato, total exato de inserções do período e detalhes/especificações explícitos. Não invente contagens ausentes; use 0.
 - "historicoDiario": inclua um item por data, com data completa em YYYY-MM-DD e quantidade diária total de inserções. Este histórico alimenta diretamente o gráfico do portal: mantenha todas as datas em ordem cronológica, inclusive dias com zero inserções. Quando houver detalhamento diário por tela, preencha também "telas" com as inserções, nomes, página, evidência e status correspondentes.
-- "desempenhoPorTela": use os mesmos nomes de local e tela e as inserções correspondentes, quando disponíveis.
 - Calcule "insercoesPeriodo" somando os valores diários do período, salvo quando o documento declarar explicitamente outro total; não some períodos duplicados. "totalExibicoesHistorico" e "diasEmExibicaoTotal" devem refletir os acumulados declarados no documento, não apenas o período atual.
-- "frequenciaGeral" deve preservar a frequência geral explicitamente informada. "resumoRelatorio" deve ser factual e mencionar o cliente.
+- "resumoRelatorio" deve ser factual, incluir o nome exato do cliente e permanecer disponível para exibição no painel do cliente.
 - Use somente informações do PDF. Para valores ausentes, use string vazia, 0, lista vazia, null ou status "desconhecido", conforme o tipo. Não invente datas, telas, locais, valores ou cálculos sem dados suficientes. A saída deve ser JSON puro, parseável diretamente.`;
 
   const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -323,11 +322,20 @@ Deno.serve(async (request) => {
       totalExibicoesHistorico: Number(generated.totalExibicoesHistorico || 0),
       insercoesPeriodo: Number(generated.insercoesPeriodo || 0),
       metaDiaria: Number(generated.metaDiaria || 0),
-      frequenciaLoop: generated.frequenciaLoop || "",
       telasAtivas: Number(generated.telasAtivas || 0),
       locais: Array.isArray(generated.locais) ? generated.locais : [],
       historicoDiario: Array.isArray(generated.historicoDiario) ? generated.historicoDiario : [],
-      desempenhoPorTela: Array.isArray(generated.desempenhoPorTela) ? generated.desempenhoPorTela : [],
+      desempenhoPorTela: Array.isArray(generated.desempenhoPorTela) && generated.desempenhoPorTela.length
+        ? generated.desempenhoPorTela
+        : (Array.isArray(generated.locais) ? generated.locais : []).flatMap((local: {
+          nome: string;
+          telas?: Array<{ nome: string; insercoes?: number; detalhes?: string }>;
+        }) => (local.telas || []).map((screen) => ({
+          localNome: local.nome,
+          telaNome: screen.nome,
+          insercoes: Number(screen.insercoes || 0),
+          detalhes: screen.detalhes || "",
+        }))),
     };
     const metricas = {
       insercoesPeriodo: report.insercoesPeriodo,
@@ -346,7 +354,6 @@ Deno.serve(async (request) => {
       period: report.periodo,
       days_accumulated: report.diasEmExibicaoTotal,
       total_impressions_accumulated: report.totalExibicoesHistorico,
-      general_frequency: report.frequenciaLoop || generated.frequenciaGeral || campaign.general_frequency,
       report_summary: report.resumoRelatorio,
       dashboard_metrics: metricas,
     }).eq("id", upload.campaign_id);
@@ -359,7 +366,6 @@ Deno.serve(async (request) => {
         name: local.nome,
         address: local.endereco || "",
         operating_hours: local.horarioFuncionamento || "",
-        local_frequency: local.frequenciaLocal || "",
       }, { onConflict: "campaign_id,name" }).select("id").single();
       if (pointResult.error) throw pointResult.error;
       for (const screen of Array.isArray(local.telas) ? local.telas : []) {
@@ -421,7 +427,7 @@ Deno.serve(async (request) => {
       report,
       totals: {
         totalExibicoesPeriodo: report.insercoesPeriodo,
-        mediaDiariaPeriodo: report.metaDiaria,
+        metaDiaria: report.metaDiaria,
         diasEmExibicaoTotal: report.diasEmExibicaoTotal,
         totalExibicoesHistorico: report.totalExibicoesHistorico,
       },

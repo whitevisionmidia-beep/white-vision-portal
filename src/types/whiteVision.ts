@@ -2,6 +2,7 @@ export interface SubTelaItem {
   id: string;
   nome: string; // Ex: "Tela 1", "Tela 2"
   exibicoes: number; // Ex: 1108
+  detalhes?: string;
   mediaDiaria?: number;
   metaDiariaEsperada: number | null;
   status: "online" | "offline" | "desconhecido";
@@ -16,11 +17,9 @@ export interface LocalPontoItem {
   endereco?: string;
   horarioFuncionamento: string; // Ex: "11:00 às 23:00 - 12h/dia"
   totalExibicoes: number; // Ex: 2136
-  frequenciaLocal: string; // Ex: "1x a cada 3.5 min"
   telas: SubTelaItem[];
   evidenciaEndereco?: string;
   evidenciaHorarioFuncionamento?: string;
-  evidenciaFrequenciaLocal?: string;
 }
 
 export interface HistoricoDiarioItem {
@@ -44,6 +43,7 @@ export interface DesempenhoPorTelaItem {
   localNome: string;
   telaNome: string;
   insercoes: number;
+  detalhes?: string;
 }
 
 export interface HistoricoDiarioSnapshotItem {
@@ -90,13 +90,10 @@ export interface RelatorioData {
   diasEmExibicaoTotal: number; // Ex: 64 ("64 dias em exibição")
   totalExibicoesHistorico: number; // Ex: 4393 ("4.393 exibições")
   totalExibicoesPeriodo: number; // Ex: 2136 (Período dos últimos 30 dias)
-  mediaDiariaPeriodo: number; // Ex: 71
-  frequenciaGeral: string; // Ex: "A cada ~3 min"
   telasAtivas?: number;
   desempenhoPorTela?: DesempenhoPorTelaItem[];
   insercoesPeriodo?: number;
   metaDiaria?: number;
-  frequenciaLoop?: string;
   resumoRelatorio?: string;
   locais: LocalPontoItem[];
   historicoDiario: HistoricoDiarioItem[];
@@ -107,7 +104,6 @@ export interface RelatorioData {
     periodo: string;
     diasEmExibicaoTotal: string;
     totalExibicoesHistorico: string;
-    frequenciaGeral: string;
   };
   conteudos?: ConteudoPortal[];
 }

@@ -4,7 +4,6 @@ import React, { useState } from "react";
 import {
   Target,
   Calendar,
-  RotateCw,
   Tv,
   Clock,
   MapPin,
@@ -75,7 +74,7 @@ export function WhiteVisionClientPortal({
   // Cálculo para o gráfico
   const maxInsercoes = Math.max(
     ...data.historicoDiario.map((d) => d.insercoes),
-    data.mediaDiariaPeriodo * 1.15 || 80
+    (data.metaDiaria ?? 0) * 1.15 || 80
   );
 
   return (
@@ -217,11 +216,11 @@ export function WhiteVisionClientPortal({
               </p>
             </div>
 
-            {/* Card 2: Média Diária no Período */}
+            {/* Card 2: Meta Diária do Relatório */}
             <div className="p-4 sm:p-5 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-sm">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
-                  Média Diária
+                  Meta Diária
                 </span>
                 <div className="w-8 h-8 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400">
                   <Calendar className="w-4 h-4" />
@@ -237,27 +236,7 @@ export function WhiteVisionClientPortal({
               </p>
             </div>
 
-            {/* Card 3: Frequência Média por Loop */}
-            <div className="p-4 sm:p-5 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-sm">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
-                  Frequência Loop
-                </span>
-                <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
-                  <RotateCw className="w-4 h-4" />
-                </div>
-              </div>
-              <div className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">
-                {data.frequenciaLoop?.trim() ||
-                  data.frequenciaGeral?.trim() ||
-                  "Não informado"}
-              </div>
-              <p className="text-[11px] text-slate-400 font-medium mt-1">
-                intervalo contínuo
-              </p>
-            </div>
-
-            {/* Card 4: Telas Ativas */}
+            {/* Card 3: Telas Ativas */}
             <div className="p-4 sm:p-5 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-sm">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
@@ -493,6 +472,11 @@ export function WhiteVisionClientPortal({
                               <p className="mt-1 text-xs font-medium text-sky-300">
                                 ~{(tela.mediaDiaria ?? 0).toLocaleString("pt-BR")} exibições/dia nesta tela
                               </p>
+                              {tela.detalhes && (
+                                <p className="mt-2 text-xs leading-relaxed text-slate-300">
+                                  {tela.detalhes}
+                                </p>
+                              )}
 
                               {/* 1. Meta Diária Esperada por Tela */}
                               <div className="mt-2 text-xs text-slate-400 flex items-center justify-between border-t border-slate-800/80 pt-2">
@@ -566,20 +550,22 @@ export function WhiteVisionClientPortal({
             {/* Barras do Gráfico Diário com Suporte Factual a Dias Zerados */}
             <div className="overflow-x-auto overflow-y-visible pb-2 pt-12 scrollbar-thin scrollbar-thumb-slate-800">
               <div className="min-w-[960px] h-[380px] flex items-end gap-1.5 sm:gap-2 px-1 pt-6 border-b border-slate-800 relative">
-                {/* Linha Guia da Média */}
-                <div
-                  className="absolute left-0 right-0 border-b border-dashed border-sky-500/40 pointer-events-none z-0"
-                  style={{
-                    bottom: `${Math.min(
-                      Math.max((data.mediaDiariaPeriodo / maxInsercoes) * 100, 15),
-                      85
-                    )}%`,
-                  }}
-                >
-                  <span className="absolute -top-4 right-2 text-[9px] font-mono text-sky-400 bg-slate-950/90 px-1.5 py-0.5 rounded border border-sky-900/60">
-                    Média: ~{data.mediaDiariaPeriodo} inserções/dia
-                  </span>
-                </div>
+                {/* Linha da meta diária fiel ao relatório */}
+                {(data.metaDiaria ?? 0) > 0 && (
+                  <div
+                    className="absolute left-0 right-0 border-b border-dashed border-sky-500/40 pointer-events-none z-0"
+                    style={{
+                      bottom: `${Math.min(
+                        Math.max((data.metaDiaria! / maxInsercoes) * 100, 15),
+                        85
+                      )}%`,
+                    }}
+                  >
+                    <span className="absolute -top-4 right-2 text-[9px] font-mono text-sky-400 bg-slate-950/90 px-1.5 py-0.5 rounded border border-sky-900/60">
+                      Meta: {data.metaDiaria?.toLocaleString("pt-BR")} inserções/dia
+                    </span>
+                  </div>
+                )}
 
                 {data.historicoDiario.map((item, index) => {
                   const isZero = item.insercoes === 0;

@@ -11,8 +11,6 @@ export const MOCK_RELATORIO_FACHO: RelatorioData = {
   diasEmExibicaoTotal: 64, // "64 dias em exibição" (acumulado histórico)
   totalExibicoesHistorico: 4393, // "4.393 exibições" (acumulado histórico total)
   totalExibicoesPeriodo: 2136, // Total no período do relatório dos últimos 30 dias
-  mediaDiariaPeriodo: 71, // Média diária no período
-  frequenciaGeral: "A cada ~3 min",
 
 
   // 2. LISTA DE PONTOS E TELAS INDIVIDUAIS (COM META DIÁRIA ESPERADA POR TELA)
@@ -22,7 +20,6 @@ export const MOCK_RELATORIO_FACHO: RelatorioData = {
       nome: "Facho Restaurante",
       horarioFuncionamento: "11:00 às 23:00 - 12h/dia",
       totalExibicoes: 2136,
-      frequenciaLocal: "1x a cada 3.5 min",
       telas: [
         {
           id: "tela-01",
