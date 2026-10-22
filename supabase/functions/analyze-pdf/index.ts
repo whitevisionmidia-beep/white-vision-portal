@@ -170,6 +170,147 @@ async function extractPdfText(file: Blob): Promise<string> {
   return text;
 }
 
+type JsonRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as JsonRecord
+    : {};
+}
+
+function normalizeCount(value: unknown, field: string): number {
+  if (value === undefined || value === null || value === "") return 0;
+  let parsed: number;
+  if (typeof value === "number") {
+    parsed = value;
+  } else if (typeof value === "string") {
+    const cleaned = value.trim().replace(/\s/g, "").replace(/[^\d,.-]/g, "");
+    const normalized = /^\d{1,3}(?:,\d{3})+$/.test(cleaned) && !cleaned.includes(".")
+      ? cleaned.replace(/,/g, "")
+      : cleaned.includes(",")
+      ? cleaned.replace(/\./g, "").replace(",", ".")
+      : /^\d{1,3}(?:\.\d{3})+$/.test(cleaned)
+      ? cleaned.replace(/\./g, "")
+      : cleaned;
+    parsed = Number(normalized);
+  } else {
+    throw new JsonParseError(`O campo numérico "${field}" tem um tipo inválido.`);
+  }
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new JsonParseError(`O campo numérico "${field}" contém um valor inválido.`);
+  }
+  return Math.round(parsed);
+}
+
+function normalizeText(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value.trim() : fallback;
+}
+
+function normalizeStatus(value: unknown): "normal" | "alerta" | "zerado" | "desconhecido" {
+  return value === "normal" || value === "alerta" || value === "zerado"
+    ? value
+    : "desconhecido";
+}
+
+function normalizeReport(source: JsonRecord) {
+  const locais = (Array.isArray(source.locais) ? source.locais : []).map((value) => {
+    const local = asRecord(value);
+    const telas = (Array.isArray(local.telas) ? local.telas : []).map((value) => {
+      const tela = asRecord(value);
+      const target = tela.metaDiariaEsperada;
+      return {
+        nome: normalizeText(tela.nome),
+        insercoes: normalizeCount(tela.insercoes, "locais.telas.insercoes"),
+        detalhes: normalizeText(tela.detalhes),
+        status: tela.status === "online" || tela.status === "offline"
+          ? tela.status
+          : "desconhecido",
+        metaDiariaEsperada: target === null || target === undefined || target === ""
+          ? null
+          : normalizeCount(target, "locais.telas.metaDiariaEsperada"),
+      };
+    }).filter((screen) => screen.nome);
+    return {
+      nome: normalizeText(local.nome),
+      endereco: normalizeText(local.endereco),
+      horarioFuncionamento: normalizeText(local.horarioFuncionamento),
+      links: (Array.isArray(local.links) ? local.links : []).map((value) => {
+        const link = asRecord(value);
+        return { rotulo: normalizeText(link.rotulo), url: normalizeText(link.url) };
+      }),
+      telas,
+    };
+  }).filter((local) => local.nome);
+
+  const desempenhoPorTela = (Array.isArray(source.desempenhoPorTela)
+    ? source.desempenhoPorTela
+    : []).map((value) => {
+      const screen = asRecord(value);
+      return {
+        localNome: normalizeText(screen.localNome),
+        telaNome: normalizeText(screen.telaNome),
+        insercoes: normalizeCount(screen.insercoes, "desempenhoPorTela.insercoes"),
+        detalhes: normalizeText(screen.detalhes),
+      };
+    }).filter((screen) => screen.localNome && screen.telaNome);
+  const normalizedPerformance = desempenhoPorTela.length
+    ? desempenhoPorTela
+    : locais.flatMap((local) => local.telas.map((screen) => ({
+      localNome: local.nome,
+      telaNome: screen.nome,
+      insercoes: screen.insercoes,
+      detalhes: screen.detalhes,
+    })));
+
+  const historicoDiario = (Array.isArray(source.historicoDiario) ? source.historicoDiario : [])
+    .map((value) => {
+      const day = asRecord(value);
+      const date = normalizeText(day.dia);
+      const parsedDate = new Date(`${date}T00:00:00Z`);
+      if (
+        !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+        Number.isNaN(parsedDate.getTime()) ||
+        parsedDate.toISOString().slice(0, 10) !== date
+      ) {
+        throw new JsonParseError(`Data inválida no histórico diário: "${date}".`);
+      }
+      return {
+        dia: date,
+        insercoes: normalizeCount(day.insercoes, "historicoDiario.insercoes"),
+        status: normalizeStatus(day.status),
+        telas: (Array.isArray(day.telas) ? day.telas : []).map((value) => {
+          const screen = asRecord(value);
+          return {
+            localNome: normalizeText(screen.localNome),
+            telaNome: normalizeText(screen.telaNome),
+            insercoes: normalizeCount(screen.insercoes, "historicoDiario.telas.insercoes"),
+            pagina: normalizeCount(screen.pagina, "historicoDiario.telas.pagina"),
+            evidencia: normalizeText(screen.evidencia),
+            status: normalizeStatus(screen.status),
+            observacaoFalha: normalizeText(screen.observacaoFalha),
+          };
+        }).filter((screen) => screen.localNome && screen.telaNome),
+      };
+    })
+    .sort((left, right) => left.dia.localeCompare(right.dia));
+
+  return {
+    token: normalizeText(source.token),
+    clienteNome: normalizeText(source.clienteNome),
+    campanhaNome: normalizeText(source.campanhaNome),
+    periodo: normalizeText(source.periodo),
+    diasEmExibicaoTotal: normalizeCount(source.diasEmExibicaoTotal, "diasEmExibicaoTotal"),
+    totalExibicoesHistorico: normalizeCount(source.totalExibicoesHistorico, "totalExibicoesHistorico"),
+    insercoesPeriodo: normalizeCount(source.insercoesPeriodo, "insercoesPeriodo"),
+    metaDiaria: normalizeCount(source.metaDiaria, "metaDiaria"),
+    telasAtivas: normalizeCount(source.telasAtivas, "telasAtivas"),
+    resumoRelatorio: normalizeText(source.resumoRelatorio),
+    desempenhoPorTela: normalizedPerformance,
+    locais,
+    historicoDiario,
+  };
+}
+
 async function callGroq(
   apiKey: string,
   pdfText: string,
@@ -193,15 +334,16 @@ async function callGroq(
 }
 Instruções de extração:
 - "clienteNome": copie o nome exato do cliente que aparece no relatório. Não use o nome do arquivo nem infira.
+- "periodo": copie as datas inicial e final exatas da campanha e preserve-as em uma representação clara (por exemplo, DD/MM/AAAA - DD/MM/AAAA). Não use a data atual nem deduza o período.
 - "metaDiaria": copie fielmente o valor numérico explicitamente impresso no relatório. Não estime, calcule, arredonde nem substitua pela média. Se não houver valor explícito, use 0.
 - "locais[].horarioFuncionamento": copie o horário de atendimento/funcionamento exatamente como aparece para cada local. Não combine horários de locais diferentes.
 - "locais[].links": extraia todos os links/URLs explicitamente associados ao local ou relatório, com o rótulo exato quando houver. Não invente, complete nem transforme endereços incompletos em links; se não houver, use lista vazia.
 - "telasAtivas": informe o número de telas explicitamente ativas. Em "locais", liste cada local identificado; em cada local, "telas" deve conter TODAS as telas individuais que constam no PDF, sem limite de quantidade, com nome/identificação exatos, inserções/exibições, detalhes e especificações vinculados, status e meta por tela quando disponíveis. Nunca crie nomes genéricos, agrupe ou duplique telas. Copie a meta por tela exatamente como impressa, sem estimar ou calcular; use null se não estiver indicada.
 - "desempenhoPorTela": inclua cada tela individual com local, nome exato, total exato de inserções do período e detalhes/especificações explícitos. Não invente contagens ausentes; use 0.
-- "historicoDiario": extraia todos os dias exibidos no relatório, normalmente os 30 dias do período. Se o PDF mostrar 30 dias, retorne exatamente as 30 linhas. Inclua um item por data com data completa em YYYY-MM-DD e quantidade diária total de inserções; use o ano indicado pelo período do próprio relatório. Mantenha ordem cronológica e inclua dias zerados somente quando constarem no relatório. Não invente linhas para datas ausentes. Este mesmo histórico é usado no gráfico e na tabela do portal. Quando houver detalhamento diário por tela, preencha também "telas" com inserções, nomes, página, evidência e status correspondentes.
+- "historicoDiario": extraia todos os dias exibidos no relatório, normalmente os 30 dias do período. Se o PDF mostrar 30 dias, retorne exatamente as 30 linhas. Inclua um item por data com data completa em YYYY-MM-DD e quantidade diária total de inserções; use o ano indicado pelo período do próprio relatório. Mantenha ordem cronológica e inclua dias zerados somente quando constarem no relatório. Não invente linhas para datas ausentes. Este mesmo histórico é usado no gráfico e na tabela do portal. Em cada dia, quando o PDF trouxer a decomposição por tela, inclua todas as telas com inserções, status e observações de falhas/quedas. Não deduza valores por tela a partir do total diário.
 - Calcule "insercoesPeriodo" somando os valores diários do período, salvo quando o documento declarar explicitamente outro total; não some períodos duplicados. "totalExibicoesHistorico" e "diasEmExibicaoTotal" devem refletir os acumulados declarados no documento, não apenas o período atual.
-- "resumoRelatorio" deve ser factual, incluir o nome exato do cliente e permanecer disponível para exibição no painel do cliente.
-- Use somente informações do PDF. Para valores ausentes, use string vazia, 0, lista vazia, null ou status "desconhecido", conforme o tipo. Não invente datas, telas, locais, valores ou cálculos sem dados suficientes. A saída deve ser JSON puro, parseável diretamente.`;
+- "resumoRelatorio" deve ser um resumo executivo bem elaborado, factual e em português: identifique cliente e período, total de exibições do período, locais auditados, quantidade de telas ativas e destaques/ocorrências relevantes. Não inclua afirmações sem evidência no PDF.
+- Todos os campos de contagem e meta devem ser números JSON inteiros, nunca strings. Use somente informações do PDF. Para valores numéricos ausentes, use 0; para meta individual sem valor explícito use null; para texto/listas ausentes, use string/lista vazia e status "desconhecido". Não invente datas, telas, locais, valores ou cálculos sem dados suficientes. A saída deve ser JSON puro, parseável diretamente.`;
 
   const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
@@ -305,7 +447,8 @@ Deno.serve(async (request) => {
       throw new Error("Groq retornou texto em vez do JSON esperado para o relatório.");
     }
 
-    if (!generated.clienteNome || !generated.resumoRelatorio) {
+    const normalizedReport = normalizeReport(asRecord(generated));
+    if (!normalizedReport.clienteNome || !normalizedReport.resumoRelatorio) {
       throw new Error("O relatório precisa conter nome do cliente e resumo.");
     }
 
@@ -317,28 +460,10 @@ Deno.serve(async (request) => {
     if (campaignError || !campaign) throw campaignError || new Error("Cliente não encontrado.");
 
     const report = {
-      ...generated,
-      clienteNome: String(generated.clienteNome),
-      campanhaNome: generated.campanhaNome || campaign.campaign_name,
-      periodo: generated.periodo || campaign.period,
-      diasEmExibicaoTotal: Number(generated.diasEmExibicaoTotal || 0),
-      totalExibicoesHistorico: Number(generated.totalExibicoesHistorico || 0),
-      insercoesPeriodo: Number(generated.insercoesPeriodo || 0),
-      metaDiaria: Number(generated.metaDiaria || 0),
-      telasAtivas: Number(generated.telasAtivas || 0),
-      locais: Array.isArray(generated.locais) ? generated.locais : [],
-      historicoDiario: Array.isArray(generated.historicoDiario) ? generated.historicoDiario : [],
-      desempenhoPorTela: Array.isArray(generated.desempenhoPorTela) && generated.desempenhoPorTela.length
-        ? generated.desempenhoPorTela
-        : (Array.isArray(generated.locais) ? generated.locais : []).flatMap((local: {
-          nome: string;
-          telas?: Array<{ nome: string; insercoes?: number; detalhes?: string }>;
-        }) => (local.telas || []).map((screen) => ({
-          localNome: local.nome,
-          telaNome: screen.nome,
-          insercoes: Number(screen.insercoes || 0),
-          detalhes: screen.detalhes || "",
-        }))),
+      ...normalizedReport,
+      campanhaNome: normalizedReport.campanhaNome || campaign.campaign_name,
+      periodo: normalizedReport.periodo || campaign.period,
+      totalExibicoesPeriodo: normalizedReport.insercoesPeriodo,
     };
     const metricas = {
       insercoesPeriodo: report.insercoesPeriodo,
@@ -363,7 +488,7 @@ Deno.serve(async (request) => {
           }
         }),
       })),
-      historicoDiario: report.historicoDiario.map((day: { dia: string; insercoes: number; status: string }) => ({
+      historicoDiario: report.historicoDiario.map((day) => ({
         data: day.dia,
         insercoes: day.insercoes,
         status: day.status,
@@ -381,6 +506,7 @@ Deno.serve(async (request) => {
     if (campaignUpdate.error) throw campaignUpdate.error;
 
     const screenIdByName = new Map<string, string>();
+    const screenTargetById = new Map<string, number | null>();
     for (const local of report.locais) {
       const pointResult = await serviceClient.from("points").upsert({
         campaign_id: upload.campaign_id,
@@ -389,43 +515,37 @@ Deno.serve(async (request) => {
         operating_hours: local.horarioFuncionamento || "",
       }, { onConflict: "campaign_id,name" }).select("id").single();
       if (pointResult.error) throw pointResult.error;
-      for (const screen of Array.isArray(local.telas) ? local.telas : []) {
+      for (const screen of local.telas) {
         const screenResult = await serviceClient.from("screens").upsert({
           point_id: pointResult.data.id,
           name: screen.nome,
-          daily_target: screen.metaDiariaEsperada ?? null,
+          daily_target: screen.metaDiariaEsperada,
           status: screen.status || "desconhecido",
         }, { onConflict: "point_id,name" }).select("id").single();
         if (screenResult.error) throw screenResult.error;
+        screenTargetById.set(screenResult.data.id, screen.metaDiariaEsperada);
         screenIdByName.set(
           `${local.nome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()}::${screen.nome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()}`,
           screenResult.data.id
         );
       }
     }
-    const dailyRows = report.historicoDiario.flatMap((day: {
-      dia: string;
-      telas?: Array<{
-        localNome: string;
-        telaNome: string;
-        insercoes: number;
-        status?: string;
-        observacaoFalha?: string;
-      }>;
-    }) => (day.telas || []).flatMap((screen) => {
-      const normalizedLocal = screen.localNome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-      const normalizedScreen = screen.telaNome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-      const screenId = screenIdByName.get(`${normalizedLocal}::${normalizedScreen}`);
-      return screenId ? [{
-        report_date: day.dia,
-        screen_id: screenId,
-        impressions_delivered: Number(screen.insercoes || 0),
-        daily_target: null,
-        nominal_failure: screen.status === "alerta" || screen.insercoes === 0,
-        report_status: screen.status || "desconhecido",
-        failure_note: screen.observacaoFalha || null,
-      }] : [];
-    }));
+    const dailyRows = report.historicoDiario.flatMap((day) =>
+      day.telas.flatMap((screen) => {
+        const normalizedLocal = screen.localNome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+        const normalizedScreen = screen.telaNome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+        const screenId = screenIdByName.get(`${normalizedLocal}::${normalizedScreen}`);
+        return screenId ? [{
+          report_date: day.dia,
+          screen_id: screenId,
+          impressions_delivered: screen.insercoes,
+          daily_target: screenTargetById.get(screenId) ?? null,
+          nominal_failure: screen.status === "alerta" || screen.status === "zerado",
+          report_status: screen.status || "desconhecido",
+          failure_note: screen.observacaoFalha || null,
+        }] : [];
+      })
+    );
     if (dailyRows.length) {
       const savedDaily = await serviceClient.from("daily_screen_reports").upsert(dailyRows, {
         onConflict: "report_date,screen_id",

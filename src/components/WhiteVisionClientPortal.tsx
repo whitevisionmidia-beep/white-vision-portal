@@ -27,6 +27,10 @@ import {
   HistoricoDiarioItem,
 } from "../types/whiteVision";
 
+function safeCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
 export interface WhiteVisionClientPortalProps {
   data: RelatorioData;
   whatsappNumber?: string;
@@ -38,9 +42,11 @@ export function WhiteVisionClientPortal({
 }: WhiteVisionClientPortalProps) {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [activeTooltipDay, setActiveTooltipDay] = useState<HistoricoDiarioItem | null>(null);
-  const [frameLogoFailed, setFrameLogoFailed] = useState(false);
-  const [headerLogoFailed, setHeaderLogoFailed] = useState(false);
   const clientTheme = { ...DEFAULT_CLIENT_THEME, ...data.clientTheme };
+  const historicoDiario = data.historicoDiario.map((day) => ({
+    ...day,
+    insercoes: safeCount(day.insercoes),
+  }));
 
   // Accordion de locais: aberto por padrão para visualização imediata
   const [expandedLocais, setExpandedLocais] = useState<Record<string, boolean>>({
@@ -61,22 +67,23 @@ export function WhiteVisionClientPortal({
       : ``;
 
     const tokenText = data.token ? `\n*Token:* ${data.token}` : "";
-    const mensagemTexto = `Olá White Vision! Gostaria de renovar a veiculação da campanha:\n\n*Cliente:* ${data.clienteNome}\n*Campanha:* ${data.campanhaNome}\n*Período Auditado:* ${data.periodo}\n*Inserções no Período:* ${data.totalExibicoesPeriodo.toLocaleString("pt-BR")}\n*Total Histórico Acumulado:* ${data.totalExibicoesHistorico.toLocaleString("pt-BR")} exibições (${data.diasEmExibicaoTotal} dias)${tokenText}${extra}\n\nPor favor, me envie as condições para renovação do próximo período!`;
+    const mensagemTexto = `Olá White Vision! Gostaria de renovar a veiculação da campanha:\n\n*Cliente:* ${data.clienteNome}\n*Campanha:* ${data.campanhaNome}\n*Período Auditado:* ${data.periodo}\n*Inserções no Período:* ${safeCount(data.totalExibicoesPeriodo).toLocaleString("pt-BR")}\n*Total Histórico Acumulado:* ${safeCount(data.totalExibicoesHistorico).toLocaleString("pt-BR")} exibições (${safeCount(data.diasEmExibicaoTotal)} dias)${tokenText}${extra}\n\nPor favor, me envie as condições para renovação do próximo período!`;
     const url = `https://wa.me/${whatsappNumber}?text=${encodeURIComponent(mensagemTexto)}`;
     window.open(url, "_blank", "noopener,noreferrer");
   };
 
   // Contagem de telas totais
-  const totalTelasNaRede = data.telasAtivas ?? data.locais.reduce(
+  const totalTelasNaRede = safeCount(data.telasAtivas ?? data.locais.reduce(
     (acc, local) => acc + (local.telas ? local.telas.length : 0),
     0
-  );
+  ));
 
-  // Cálculo para o gráfico
   const maxInsercoes = Math.max(
-    ...data.historicoDiario.map((d) => d.insercoes),
-    (data.metaDiaria ?? 0) * 1.15 || 80
+    80,
+    ...historicoDiario.map((day) => day.insercoes),
+    safeCount(data.metaDiaria) * 1.15
   );
+  const metaDiariaReal = safeCount(data.metaDiaria);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans antialiased selection:bg-emerald-500/30 selection:text-emerald-200 pb-28 sm:pb-24">
@@ -95,27 +102,15 @@ export function WhiteVisionClientPortal({
       </div>
 
       <div className="max-w-3xl mx-auto px-4 sm:px-6 pt-6 sm:pt-10">
-        {/* ================================================================= */}
-        {/* HEADER: Minimalista com Badge "🟢 Relatório de Veiculação Auditada"*/}
-        {/* ================================================================= */}
         <header className="mb-8 rounded-3xl border border-slate-800 bg-slate-900/90 p-4 shadow-xl shadow-black/20 backdrop-blur-sm sm:p-6">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-5 border-b border-slate-800/80">
-            {/* Logo da White Vision via tag <img> */}
-            <div className="flex items-center gap-3">
-              <img
-                src={
-                  headerLogoFailed || !clientTheme.logoUrl
-                    ? DEFAULT_CLIENT_THEME.logoUrl
-                    : clientTheme.logoUrl
-                }
-                onError={() => setHeaderLogoFailed(true)}
-                alt={data.clienteNome}
-                translate="no"
-                className="h-10 sm:h-12 w-auto object-contain drop-shadow-md"
-              />
+            <div>
+              <h1 className="text-3xl font-black tracking-tight text-white sm:text-4xl">
+                White Vision
+              </h1>
+              <p className="mt-0.5 text-sm font-semibold text-emerald-300">Portal do Cliente</p>
             </div>
 
-            {/* Badge: 🟢 Relatório de Veiculação Auditada */}
             <div className="inline-flex items-center gap-2 self-start sm:self-auto px-3.5 py-1.5 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs sm:text-sm font-semibold shadow-inner shadow-emerald-950">
               <span className="relative flex h-2.5 w-2.5">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -129,12 +124,12 @@ export function WhiteVisionClientPortal({
           <div className="mt-5 p-4 sm:p-5 rounded-2xl bg-black/30 border border-slate-800/80 relative overflow-hidden">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
               <div>
-                <span translate="no" className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 block mb-1">
-                  Portal do Cliente • White Vision
+                <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 block mb-1">
+                  Cliente
                 </span>
-                <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
                   {data.clienteNome}
-                </h1>
+                </h2>
                 <p className="text-sm text-sky-400 font-medium mt-0.5">
                   {data.campanhaNome}
                 </p>
@@ -181,7 +176,7 @@ export function WhiteVisionClientPortal({
                     </span>
                     <span className="text-slate-600">•</span>
                     <span className="text-emerald-400">
-                      {data.totalExibicoesHistorico.toLocaleString("pt-BR")} exibições
+                      {safeCount(data.totalExibicoesHistorico).toLocaleString("pt-BR")} exibições
                     </span>
                   </div>
                 </div>
@@ -197,8 +192,7 @@ export function WhiteVisionClientPortal({
             </div>
           </div>
 
-          {/* 4 Cards de Métricas do Período dos Últimos 30 Dias */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
             {/* Card 1: Total do Período */}
             <div className="p-4 sm:p-5 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-sm">
               <div className="flex items-center justify-between mb-2">
@@ -210,27 +204,25 @@ export function WhiteVisionClientPortal({
                 </div>
               </div>
               <div className="text-xl sm:text-2xl font-black text-white tracking-tight">
-                {data.totalExibicoesPeriodo.toLocaleString("pt-BR")}
+                {safeCount(data.totalExibicoesPeriodo).toLocaleString("pt-BR")}
               </div>
               <p className="text-[11px] text-emerald-400 font-medium mt-1">
                 exibições (últimos 30 dias)
               </p>
             </div>
 
-            {/* Card 2: Meta Diária do Relatório */}
+            {/* Card 2: Meta diária fiel ao relatório */}
             <div className="p-4 sm:p-5 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-sm">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
-                  Meta Diária
+                  Média Diária
                 </span>
                 <div className="w-8 h-8 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400">
                   <Calendar className="w-4 h-4" />
                 </div>
               </div>
               <div className="text-xl sm:text-2xl font-black text-white tracking-tight">
-                {typeof data.metaDiaria === "number" && data.metaDiaria > 0
-                  ? `${data.metaDiaria.toLocaleString("pt-BR")} inserções/dia`
-                  : "Não informado"}
+                {`${metaDiariaReal.toLocaleString("pt-BR")} inserções/dia`}
               </div>
               <p className="text-[11px] text-sky-400 font-medium mt-1">
                 meta diária do relatório
@@ -296,24 +288,10 @@ export function WhiteVisionClientPortal({
                       />
                     )}
                     <div
-                      className="flex h-16 max-h-16 w-full min-w-0 items-center justify-center overflow-hidden rounded-xl px-3"
+                      className="flex h-16 max-h-16 w-full min-w-0 items-center justify-center overflow-hidden rounded-xl px-3 text-lg font-black tracking-wide text-white"
                       style={{ backgroundColor: clientTheme.logoBgColor }}
                     >
-                      <img
-                        src={
-                          frameLogoFailed || !clientTheme.logoUrl
-                            ? DEFAULT_CLIENT_THEME.logoUrl
-                            : clientTheme.logoUrl
-                        }
-                        alt={`Logo ${data.clienteNome}`}
-                        onError={() => setFrameLogoFailed(true)}
-                        style={{
-                          height: `${Math.min(Math.max(clientTheme.logoSize, 20), 64)}px`,
-                          maxHeight: "100%",
-                          maxWidth: "100%",
-                        }}
-                        className="h-auto w-auto max-w-full object-contain"
-                      />
+                      White Vision
                     </div>
                   </div>
                   {conteudo.titulo && (
@@ -357,6 +335,8 @@ export function WhiteVisionClientPortal({
           <div className="space-y-4">
             {data.locais.map((local: LocalPontoItem) => {
               const isExpanded = Boolean(expandedLocais[local.id]);
+              const totalLocal = safeCount(local.totalExibicoes) ||
+                local.telas.reduce((sum, screen) => sum + safeCount(screen.exibicoes), 0);
 
               return (
                 <div
@@ -379,7 +359,7 @@ export function WhiteVisionClientPortal({
                             {local.nome}
                           </h3>
                           <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-emerald-300">
-                            Total: {local.totalExibicoes.toLocaleString("pt-BR")} exibições
+                            Total: {totalLocal.toLocaleString("pt-BR")} exibições
                           </span>
                         </div>
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400 mt-1">
@@ -429,9 +409,12 @@ export function WhiteVisionClientPortal({
                     <div className="px-5 pb-5 pt-2 border-t border-slate-800/80 bg-slate-950/50">
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {local.telas.map((tela: SubTelaItem) => {
-                          const percentualLocal = Math.round(
-                            (tela.exibicoes / local.totalExibicoes) * 100
-                          );
+                          const totalTela = safeCount(tela.exibicoes);
+                          const percentualLocal = totalLocal > 0
+                            ? Math.round((totalTela / totalLocal) * 100)
+                            : 0;
+                          const diasNoPeriodo = Math.max(historicoDiario.length, 1);
+                          const exibicoesPorDia = Math.round(totalTela / diasNoPeriodo);
                           const isOnline = tela.status === "online";
                           const isOffline = tela.status === "offline";
 
@@ -478,7 +461,7 @@ export function WhiteVisionClientPortal({
                               {/* Total e Percentual */}
                               <div className="mt-2 flex items-baseline justify-between">
                                 <span className="text-xl font-black text-white">
-                                  {tela.exibicoes.toLocaleString("pt-BR")}{" "}
+                                  {totalTela.toLocaleString("pt-BR")}{" "}
                                   <span className="text-xs font-normal text-slate-400">
                                     exibições
                                   </span>
@@ -487,6 +470,9 @@ export function WhiteVisionClientPortal({
                                   {percentualLocal}% do local
                                 </span>
                               </div>
+                              <p className="mt-1 text-xs font-medium text-sky-300">
+                                {exibicoesPorDia.toLocaleString("pt-BR")} exibições/dia em média
+                              </p>
                               {tela.detalhes && (
                                 <p className="mt-2 text-xs leading-relaxed text-slate-300">
                                   {tela.detalhes}
@@ -499,7 +485,7 @@ export function WhiteVisionClientPortal({
                                 <strong className="text-slate-200 font-mono">
                                   {tela.metaDiariaEsperada === null
                                     ? "Não informado no relatório"
-                                    : `${tela.metaDiariaEsperada} exibições/dia`}
+                                    : `${safeCount(tela.metaDiariaEsperada).toLocaleString("pt-BR")} exibições/dia`}
                                 </strong>
                               </div>
 
@@ -509,7 +495,7 @@ export function WhiteVisionClientPortal({
                                   className={`h-full rounded-full ${
                                     isOnline ? "bg-emerald-400" : "bg-amber-400"
                                   }`}
-                                  style={{ width: `${percentualLocal}%` }}
+                                  style={{ width: `${Math.min(Math.max(percentualLocal, 0), 100)}%` }}
                                 />
                               </div>
 
@@ -566,23 +552,23 @@ export function WhiteVisionClientPortal({
             <div className="overflow-x-auto overflow-y-visible pb-2 pt-12 scrollbar-thin scrollbar-thumb-slate-800">
               <div className="min-w-[960px] h-[380px] flex items-end gap-1.5 sm:gap-2 px-1 pt-6 border-b border-slate-800 relative">
                 {/* Linha da meta diária fiel ao relatório */}
-                {(data.metaDiaria ?? 0) > 0 && (
+                {metaDiariaReal > 0 && (
                   <div
                     className="absolute left-0 right-0 border-b border-dashed border-sky-500/40 pointer-events-none z-0"
                     style={{
                       bottom: `${Math.min(
-                        Math.max((data.metaDiaria! / maxInsercoes) * 100, 15),
+                        Math.max((metaDiariaReal / maxInsercoes) * 100, 15),
                         85
                       )}%`,
                     }}
                   >
                     <span className="absolute -top-4 right-2 text-[9px] font-mono text-sky-400 bg-slate-950/90 px-1.5 py-0.5 rounded border border-sky-900/60">
-                      Meta: {data.metaDiaria?.toLocaleString("pt-BR")} inserções/dia
+                      Meta: {metaDiariaReal.toLocaleString("pt-BR")} inserções/dia
                     </span>
                   </div>
                 )}
 
-                {data.historicoDiario.map((item, index) => {
+                {historicoDiario.map((item, index) => {
                   const isZero = item.insercoes === 0;
                   const isAbaixoMeta = item.status === "alerta" || isZero;
                   const percentage = isZero
@@ -670,7 +656,7 @@ export function WhiteVisionClientPortal({
 
             <details className="mt-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/70">
               <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-slate-200">
-                Ver histórico diário em tabela ({data.historicoDiario.length} dias)
+                Ver histórico diário em tabela ({historicoDiario.length} dias)
               </summary>
               <div className="max-h-96 overflow-auto border-t border-slate-800">
                 <table className="w-full text-left text-sm">
@@ -682,7 +668,7 @@ export function WhiteVisionClientPortal({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/80">
-                    {data.historicoDiario.map((item, index) => (
+                    {historicoDiario.map((item, index) => (
                       <tr key={`${item.dia}-${index}`} className="text-slate-300">
                         <td className="whitespace-nowrap px-4 py-2">{item.dia}</td>
                         <td className="px-4 py-2 text-right font-mono">

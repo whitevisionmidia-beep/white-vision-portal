@@ -12,6 +12,7 @@ import {
   createClient,
   removeClient,
   removeVideo,
+  deleteRelatorioDiario,
   saveCampanha,
   saveRelatorios,
   saveTela,
@@ -36,8 +37,8 @@ import { DEFAULT_CLIENT_THEME } from "../types/whiteVision";
 import { getPublicMediaUrl } from "../lib/supabase";
 
 function formatDia(isoDate: string): string {
-  const [, month, day] = isoDate.split("-");
-  return `${day}/${month}`;
+  const [year, month, day] = isoDate.split("-");
+  return `${day}/${month}/${year}`;
 }
 
 export function AdminPage() {
@@ -68,6 +69,7 @@ export function AdminPage() {
   const [summary, setSummary] = useState<string | null>(null);
   const [reportPdf, setReportPdf] = useState<File | null>(null);
   const [importingPdf, setImportingPdf] = useState(false);
+  const [deletingDailyReport, setDeletingDailyReport] = useState(false);
   const [profileSavedLink, setProfileSavedLink] = useState<{
     clientName: string;
     clientPath: string;
@@ -160,8 +162,13 @@ export function AdminPage() {
     [relatoriosDraft, telaIdsDaCampanha]
   );
   const datas = useMemo(
-    () => [...new Set(relatoriosDaCampanha.map((item) => item.data))].sort(),
-    [relatoriosDaCampanha]
+    () => [
+      ...new Set([
+        ...relatoriosDaCampanha.map((item) => item.data),
+        ...(campanhaDraft?.metricasDashboard?.historicoDiario || []).map((item) => item.data),
+      ]),
+    ].sort(),
+    [relatoriosDaCampanha, campanhaDraft?.metricasDashboard?.historicoDiario]
   );
 
   const applyDb = (next: WhiteVisionDb) => {
@@ -239,9 +246,7 @@ export function AdminPage() {
       let nextDb: WhiteVisionDb | null = null;
       for (const tela of telasDaCampanha) {
         const payload = await saveTela(tela.id, {
-          ...(typeof tela.metaDiaria === "number"
-            ? { metaDiaria: tela.metaDiaria }
-            : {}),
+          metaDiaria: tela.metaDiaria,
           status: tela.status,
         });
         nextDb = payload.db;
@@ -286,6 +291,22 @@ export function AdminPage() {
         item.telaId === telaId && item.data === data ? { ...item, ...patch } : item
       )
     );
+  };
+
+  const handleDeleteDailyReport = async (report: RelatorioDiarioTela) => {
+    if (!window.confirm(`Excluir o registro diário de ${formatDia(report.data)} desta tela?`)) return;
+    setDeletingDailyReport(true);
+    setError(null);
+    try {
+      const payload = await deleteRelatorioDiario(report.id);
+      setDb(payload.db);
+      setRelatoriosDraft((previous) => previous.filter((item) => item.id !== report.id));
+      flash("Registro diário excluído.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeletingDailyReport(false);
+    }
   };
 
   const handleCreateClient = async (event: React.FormEvent) => {
@@ -877,8 +898,7 @@ export function AdminPage() {
           <div>
             <h2 className="text-lg font-bold text-white">Importar relatório PDF com Groq</h2>
             <p className="text-sm text-slate-400">
-              Analise o PDF e confira os dados extraídos. Depois salve o arquivo no histórico,
-              gere o resumo da IA e confirme a gravação dos dados no perfil do cliente.
+              A análise salva os dados extraídos, as metas por tela e o histórico diário no perfil e no histórico do PDF. Confira os campos e edite-os antes de salvar alterações.
             </p>
           </div>
           <label className="block text-sm space-y-1">
@@ -1011,18 +1031,25 @@ export function AdminPage() {
           )}
           {db.relatoriosPdf.length > 0 && (
             <div className="space-y-2">
-              <h3 className="text-sm font-semibold text-slate-200">PDFs salvos</h3>
+              <h3 className="text-sm font-semibold text-slate-200">
+                Histórico de relatórios de {db.campanhas.find((campaign) => campaign.id === pdfClientId)?.clienteNome || "clientes"}
+              </h3>
+              <p className="text-xs text-slate-400">
+                Selecione um cliente acima para navegar pelos PDFs e períodos já cadastrados.
+              </p>
               <ul className="divide-y divide-slate-800 rounded-xl border border-slate-800">
                 {[...db.relatoriosPdf]
+                  .filter((upload) => !pdfClientId || upload.campanhaId === pdfClientId)
                   .sort((left, right) => right.criadoEm.localeCompare(left.criadoEm))
                   .map((upload) => (
-                    <li key={upload.id} className="flex flex-col gap-1 p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+                    <li key={upload.id} className="flex flex-col gap-1 p-3 text-sm sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
                       <div className="min-w-0">
                         <p className="break-all text-slate-200">{upload.nomeArquivo}</p>
                         <p className="text-xs text-slate-500">
                           {db.campanhas.find((campaign) => campaign.id === upload.campanhaId)?.clienteNome || "Cliente removido"}
                           {" · "}
                           {new Date(upload.criadoEm).toLocaleString("pt-BR")}
+                          {upload.relatorio?.periodo ? ` · ${upload.relatorio.periodo}` : ""}
                         </p>
                         {upload.erro && <p className="mt-1 text-xs text-rose-300">{upload.erro}</p>}
                       </div>
@@ -1085,8 +1112,18 @@ export function AdminPage() {
                           <Trash2 size={14} aria-hidden="true" />
                         </button>
                       </div>
+                      {upload.relatorio && (
+                        <details className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-950/60 p-3 sm:basis-full">
+                          <summary className="cursor-pointer text-xs font-semibold text-sky-300">
+                            Visualizar dados extraídos deste período
+                          </summary>
+                          <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap text-xs text-slate-300">
+                            {JSON.stringify(upload.relatorio, null, 2)}
+                          </pre>
+                        </details>
+                      )}
                       {upload.resumoIA && (
-                        <p className="mt-2 whitespace-pre-wrap rounded-lg bg-slate-950/70 p-3 text-xs text-slate-300">
+                        <p className="mt-2 w-full whitespace-pre-wrap rounded-lg bg-slate-950/70 p-3 text-xs text-slate-300 sm:basis-full">
                           <strong className="text-violet-200">Resumo da IA: </strong>{upload.resumoIA}
                         </p>
                       )}
@@ -1601,7 +1638,7 @@ export function AdminPage() {
         >
           <h2 className="text-lg font-bold text-white">Relatórios diários de 30 dias</h2>
           <p className="text-xs text-slate-400">
-            Exibições entregues por tela, meta do dia e flag de falha nominal.
+            Exibições por tela, meta diária, falha/queda e observações. As datas agregadas sem detalhe por tela ficam identificadas, sem valores inventados.
           </p>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[760px] text-sm">
@@ -1609,7 +1646,7 @@ export function AdminPage() {
                 <tr className="text-left text-slate-400 border-b border-slate-800">
                   <th className="py-2 pr-3">Data</th>
                   {telasDaCampanha.map((tela) => (
-                    <th key={tela.id} className="py-2 pr-3" colSpan={3}>
+                    <th key={tela.id} className="py-2 pr-3" colSpan={5}>
                       {tela.nome}
                     </th>
                   ))}
@@ -1618,14 +1655,23 @@ export function AdminPage() {
                   <th className="py-2 pr-3" />
                   {telasDaCampanha.map((tela) => (
                     <React.Fragment key={`${tela.id}-sub`}>
+                      <th className="py-2 pr-3 font-medium">Meta diária</th>
                       <th className="py-2 pr-3 font-medium">Exibições</th>
                       <th className="py-2 pr-3 font-medium">Falha</th>
                       <th className="py-2 pr-3 font-medium">Observação</th>
+                      <th className="py-2 pr-3 font-medium">Ação</th>
                     </React.Fragment>
                   ))}
                 </tr>
               </thead>
               <tbody>
+                {datas.length === 0 && (
+                  <tr>
+                    <td colSpan={1 + telasDaCampanha.length * 5} className="py-4 text-center text-sm text-slate-400">
+                      Ainda não há histórico diário associado a esta campanha.
+                    </td>
+                  </tr>
+                )}
                 {datas.map((data) => (
                   <tr key={data} className="border-b border-slate-800/80 align-top">
                     <td className="py-2 pr-3 whitespace-nowrap font-mono text-slate-300">
@@ -1635,9 +1681,30 @@ export function AdminPage() {
                       const relatorio = relatoriosDraft.find(
                         (item) => item.telaId === tela.id && item.data === data
                       );
-                      if (!relatorio) return null;
+                      if (!relatorio) {
+                        return (
+                          <td key={`${tela.id}-${data}-missing`} colSpan={5} className="py-2 pr-3 text-xs text-slate-500">
+                            Sem dados extraídos para esta tela nesta data.
+                          </td>
+                        );
+                      }
                       return (
                         <React.Fragment key={`${tela.id}-${data}`}>
+                          <td className="py-2 pr-3">
+                            <input
+                              type="number"
+                              min={0}
+                              step={1}
+                              className="w-24 rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5"
+                              value={relatorio.metaDiaria ?? ""}
+                              onChange={(event) =>
+                                updateRelatorio(tela.id, data, {
+                                  metaDiaria: event.target.value === "" ? null : Number(event.target.value),
+                                })
+                              }
+                              aria-label={`Meta diária de ${tela.nome} em ${formatDia(data)}`}
+                            />
+                          </td>
                           <td className="py-2 pr-3">
                             <input
                               type="number"
@@ -1675,6 +1742,17 @@ export function AdminPage() {
                               }
                             />
                           </td>
+                          <td className="py-2 pr-3">
+                            <button
+                              type="button"
+                              disabled={deletingDailyReport || saving}
+                              onClick={() => void handleDeleteDailyReport(relatorio)}
+                              className="rounded-md border border-rose-500/40 px-2 py-1 text-xs text-rose-300 disabled:opacity-60"
+                              aria-label={`Excluir registro de ${tela.nome} em ${formatDia(data)}`}
+                            >
+                              Excluir
+                            </button>
+                          </td>
                         </React.Fragment>
                       );
                     })}
@@ -1685,7 +1763,7 @@ export function AdminPage() {
           </div>
           <button
             type="submit"
-            disabled={saving}
+            disabled={saving || deletingDailyReport}
             className="rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2.5 disabled:opacity-60"
           >
             Salvar relatórios diários

@@ -7,11 +7,214 @@ import type {
   VideoPortal,
   WhiteVisionDb,
 } from "../types/adminDb";
-import type { ClientTheme, LinkRelatorioItem, RelatorioData } from "../types/whiteVision";
+import type {
+  ClientTheme,
+  HistoricoDiarioSnapshotItem,
+  LinkRelatorioItem,
+  RelatorioData,
+  SubTelaItem,
+} from "../types/whiteVision";
 import { DEFAULT_CLIENT_THEME } from "../types/whiteVision";
 import { getPublicMediaUrl, getSupabase } from "./supabase";
 
 type Row = Record<string, unknown>;
+type DashboardMetrics = NonNullable<CampanhaCliente["metricasDashboard"]>;
+
+function recordFrom(value: unknown): Row {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Row
+    : {};
+}
+
+function numberFrom(value: unknown): number {
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? Math.round(value) : 0;
+  if (typeof value !== "string" || !value.trim()) return 0;
+  const cleaned = value.trim().replace(/\s/g, "").replace(/[^\d,.-]/g, "");
+  const normalized = /^\d{1,3}(?:,\d{3})+$/.test(cleaned) && !cleaned.includes(".")
+    ? cleaned.replace(/,/g, "")
+    : cleaned.includes(",")
+    ? cleaned.replace(/\./g, "").replace(",", ".")
+    : /^\d{1,3}(?:\.\d{3})+$/.test(cleaned)
+    ? cleaned.replace(/\./g, "")
+    : cleaned;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : 0;
+}
+
+function nullableNumberFrom(value: unknown): number | null {
+  return value === null || value === undefined || value === "" ? null : numberFrom(value);
+}
+
+function historyStatusFrom(value: unknown): HistoricoDiarioSnapshotItem["status"] {
+  return value === "normal" || value === "alerta" || value === "zerado"
+    ? value
+    : "desconhecido";
+}
+
+function themeFromValue(value: unknown): ClientTheme {
+  const theme = recordFrom(value);
+  return {
+    ...DEFAULT_CLIENT_THEME,
+    frameColor: typeof theme.frameColor === "string" ? theme.frameColor : DEFAULT_CLIENT_THEME.frameColor,
+    topBannerText: typeof theme.topBannerText === "string" ? theme.topBannerText : DEFAULT_CLIENT_THEME.topBannerText,
+    logoUrl: typeof theme.logoUrl === "string" ? theme.logoUrl : DEFAULT_CLIENT_THEME.logoUrl,
+    primaryColor: typeof theme.primaryColor === "string" ? theme.primaryColor : DEFAULT_CLIENT_THEME.primaryColor,
+    logoSize: numberFrom(theme.logoSize || DEFAULT_CLIENT_THEME.logoSize),
+    logoBgColor: typeof theme.logoBgColor === "string" ? theme.logoBgColor : DEFAULT_CLIENT_THEME.logoBgColor,
+  };
+}
+
+function metricsFromValue(value: unknown): DashboardMetrics {
+  const metrics = recordFrom(value);
+  const performance = Array.isArray(metrics.desempenhoPorTela)
+    ? metrics.desempenhoPorTela.map((item) => {
+        const screen = recordFrom(item);
+        return {
+          localNome: String(screen.localNome || ""),
+          telaNome: String(screen.telaNome || ""),
+          insercoes: numberFrom(screen.insercoes),
+          detalhes: typeof screen.detalhes === "string" ? screen.detalhes : "",
+        };
+      })
+    : [];
+  const locais = Array.isArray(metrics.locais)
+    ? metrics.locais.map((item) => {
+        const local = recordFrom(item);
+        return {
+          nome: String(local.nome || ""),
+          horarioFuncionamento: typeof local.horarioFuncionamento === "string"
+            ? local.horarioFuncionamento
+            : "",
+          links: Array.isArray(local.links)
+            ? local.links.flatMap((item) => {
+                const link = recordFrom(item);
+                if (typeof link.url !== "string" || typeof link.rotulo !== "string") return [];
+                try {
+                  const url = new URL(link.url);
+                  return url.protocol === "http:" || url.protocol === "https:"
+                    ? [{ rotulo: link.rotulo, url: url.href }]
+                    : [];
+                } catch {
+                  return [];
+                }
+              })
+            : [],
+        };
+      })
+    : [];
+  const historicoDiario = Array.isArray(metrics.historicoDiario)
+    ? metrics.historicoDiario.map((item) => {
+        const day = recordFrom(item);
+        return {
+          data: String(day.data || ""),
+          insercoes: numberFrom(day.insercoes),
+          status: historyStatusFrom(day.status),
+        };
+      }).filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item.data))
+    : [];
+  return {
+    insercoesPeriodo: numberFrom(metrics.insercoesPeriodo),
+    metaDiaria: numberFrom(metrics.metaDiaria),
+    telasAtivas: numberFrom(metrics.telasAtivas),
+    desempenhoPorTela: performance,
+    locais,
+    historicoDiario,
+  };
+}
+
+function reportFromValue(value: unknown): RelatorioData | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const report = recordFrom(value);
+  const locais = Array.isArray(report.locais)
+    ? report.locais.map((item, localIndex) => {
+        const local = recordFrom(item);
+        const telas = Array.isArray(local.telas)
+          ? local.telas.map((value, screenIndex) => {
+              const screen = recordFrom(value);
+              const status: SubTelaItem["status"] = screen.status === "online" || screen.status === "offline"
+                ? screen.status
+                : "desconhecido";
+              return {
+                id: String(screen.id || `${localIndex}-${screenIndex}`),
+                nome: String(screen.nome || ""),
+                exibicoes: numberFrom(screen.insercoes ?? screen.exibicoes),
+                detalhes: typeof screen.detalhes === "string" ? screen.detalhes : "",
+                metaDiariaEsperada: nullableNumberFrom(screen.metaDiariaEsperada),
+                status,
+              };
+            })
+          : [];
+        const localLinks = Array.isArray(local.links)
+          ? local.links.flatMap((value) => {
+              const link = recordFrom(value);
+              if (typeof link.url !== "string") return [];
+              try {
+                const url = new URL(link.url);
+                if (url.protocol !== "http:" && url.protocol !== "https:") return [];
+                return [{ rotulo: String(link.rotulo || url.href), url: url.href }];
+              } catch {
+                return [];
+              }
+            })
+          : [];
+        return {
+          id: String(local.id || localIndex),
+          nome: String(local.nome || ""),
+          endereco: typeof local.endereco === "string" ? local.endereco : "",
+          horarioFuncionamento: typeof local.horarioFuncionamento === "string"
+            ? local.horarioFuncionamento
+            : "",
+          totalExibicoes: telas.reduce((sum, screen) => sum + screen.exibicoes, 0),
+          links: localLinks,
+          telas,
+        };
+      })
+    : [];
+  const historicoDiario = Array.isArray(report.historicoDiario)
+    ? report.historicoDiario.map((value) => {
+        const day = recordFrom(value);
+        const date = String(day.dia || day.data || "");
+        const screenDetails = Array.isArray(day.telas)
+          ? day.telas.map((value) => {
+              const screen = recordFrom(value);
+              return {
+                localNome: String(screen.localNome || ""),
+                telaNome: String(screen.telaNome || ""),
+                insercoes: numberFrom(screen.insercoes),
+                pagina: numberFrom(screen.pagina),
+                evidencia: String(screen.evidencia || ""),
+                status: historyStatusFrom(screen.status),
+                observacaoFalha: String(screen.observacaoFalha || ""),
+              };
+            })
+          : [];
+        return {
+          dia: /^\d{4}-\d{2}-\d{2}$/.test(date) ? `${date.slice(8, 10)}/${date.slice(5, 7)}` : date,
+          insercoes: numberFrom(day.insercoes),
+          status: historyStatusFrom(day.status),
+          telas: screenDetails,
+        };
+      })
+    : [];
+  const metrics = metricsFromValue(report);
+  const performance = metrics.desempenhoPorTela || [];
+  return {
+    token: String(report.token || ""),
+    clienteNome: String(report.clienteNome || ""),
+    campanhaNome: String(report.campanhaNome || ""),
+    periodo: String(report.periodo || ""),
+    diasEmExibicaoTotal: numberFrom(report.diasEmExibicaoTotal),
+    totalExibicoesHistorico: numberFrom(report.totalExibicoesHistorico),
+    totalExibicoesPeriodo: numberFrom(report.totalExibicoesPeriodo ?? report.insercoesPeriodo),
+    telasAtivas: numberFrom(report.telasAtivas),
+    desempenhoPorTela: performance,
+    insercoesPeriodo: numberFrom(report.insercoesPeriodo ?? report.totalExibicoesPeriodo),
+    metaDiaria: numberFrom(report.metaDiaria),
+    resumoRelatorio: typeof report.resumoRelatorio === "string" ? report.resumoRelatorio : "",
+    locais,
+    historicoDiario,
+  };
+}
 
 function unwrap<T>(result: { data: T | null; error: { message: string } | null }): T {
   if (result.error) throw new Error(result.error.message);
@@ -26,15 +229,15 @@ function campaignFromRow(row: Row): CampanhaCliente {
     clienteNome: String(row.client_name),
     campanhaNome: String(row.campaign_name),
     token: String(row.token),
-    diasAcumulados: Number(row.days_accumulated || 0),
-    totalExibicoesAcumuladas: Number(row.total_impressions_accumulated || 0),
+    diasAcumulados: numberFrom(row.days_accumulated),
+    totalExibicoesAcumuladas: numberFrom(row.total_impressions_accumulated),
     status: row.status as CampanhaCliente["status"],
     periodo: String(row.period || ""),
     ...(typeof row.month_year === "string" ? { mesAno: row.month_year } : {}),
     frequenciaGeral: String(row.general_frequency || ""),
     ...(typeof row.report_summary === "string" ? { resumoRelatorio: row.report_summary } : {}),
-    clientTheme: (row.client_theme || {}) as ClientTheme,
-    metricasDashboard: (row.dashboard_metrics || {}) as CampanhaCliente["metricasDashboard"],
+    clientTheme: themeFromValue(row.client_theme),
+    metricasDashboard: metricsFromValue(row.dashboard_metrics),
   };
 }
 
@@ -54,7 +257,7 @@ function screenFromRow(row: Row): TelaPonto {
     id: String(row.id),
     pontoId: String(row.point_id),
     nome: String(row.name),
-    metaDiaria: typeof row.daily_target === "number" ? row.daily_target : null,
+    metaDiaria: nullableNumberFrom(row.daily_target),
     status: row.status as TelaPonto["status"],
   };
 }
@@ -64,8 +267,8 @@ function dailyFromRow(row: Row): RelatorioDiarioTela {
     id: String(row.id),
     data: String(row.report_date),
     telaId: String(row.screen_id),
-    exibicoesEntregues: Number(row.impressions_delivered || 0),
-    metaDiaria: typeof row.daily_target === "number" ? row.daily_target : null,
+    exibicoesEntregues: numberFrom(row.impressions_delivered),
+    metaDiaria: nullableNumberFrom(row.daily_target),
     falhaNominal: Boolean(row.nominal_failure),
     ...(typeof row.report_status === "string"
       ? { statusRelatorio: row.report_status as RelatorioDiarioTela["statusRelatorio"] }
@@ -83,18 +286,19 @@ function videoFromRow(row: Row): VideoPortal {
     arquivoId: String(row.storage_path),
     nomeArquivo: String(row.original_file_name),
     mimeType: row.mime_type as VideoPortal["mimeType"],
-    tamanhoBytes: Number(row.size_bytes || 0),
+    tamanhoBytes: numberFrom(row.size_bytes),
   };
 }
 
 function pdfFromRow(row: Row): PdfReportUpload {
+  const report = reportFromValue(row.report);
   return {
     id: String(row.id),
     campanhaId: String(row.campaign_id),
     nomeArquivo: String(row.original_file_name),
     criadoEm: String(row.created_at),
     status: row.status as PdfReportUpload["status"],
-    ...(row.report ? { relatorio: row.report as RelatorioData } : {}),
+    ...(report ? { relatorio: report } : {}),
     ...(typeof row.ai_summary === "string" ? { resumoIA: row.ai_summary } : {}),
     ...(typeof row.error_message === "string" ? { erro: row.error_message } : {}),
   };
@@ -323,16 +527,70 @@ export async function savePdfReportToClient(
   uploadId: string
 ): Promise<{ db: WhiteVisionDb; clientName: string; clientPath: string }> {
   const supabase = getSupabase();
-  const reportResult = await supabase.from("pdf_reports").select("campaign_id").eq("id", uploadId).single();
+  const reportResult = await supabase
+    .from("pdf_reports")
+    .select("campaign_id,report,ai_summary")
+    .eq("id", uploadId)
+    .single();
   const report = unwrap(reportResult) as Row;
+  const extracted = reportFromValue(report.report);
+  if (!extracted) throw new Error("Este PDF ainda não possui dados analisados para salvar no perfil.");
+  const campaignResult = await supabase
+    .from("campaigns")
+    .select("client_name,campaign_name,slug,period,days_accumulated,total_impressions_accumulated,report_summary")
+    .eq("id", report.campaign_id)
+    .single();
+  const currentCampaign = unwrap(campaignResult) as Row;
+  if (!extracted.clienteNome && !currentCampaign.client_name) {
+    throw new Error("O PDF não contém um nome de cliente válido para atualizar o perfil.");
+  }
+  const original = recordFrom(report.report);
+  const dailyMetrics = (Array.isArray(original.historicoDiario) ? original.historicoDiario : [])
+    .flatMap((value) => {
+      const day = recordFrom(value);
+      const date = String(day.dia || day.data || "");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
+      return [{
+        data: date,
+        insercoes: numberFrom(day.insercoes),
+        status: historyStatusFrom(day.status),
+      }];
+    })
+    .sort((left, right) => left.data.localeCompare(right.data));
+  const dashboardMetrics: DashboardMetrics = {
+    insercoesPeriodo: extracted.totalExibicoesPeriodo,
+    metaDiaria: extracted.metaDiaria || 0,
+    telasAtivas: extracted.telasAtivas || 0,
+    desempenhoPorTela: extracted.desempenhoPorTela || [],
+    locais: extracted.locais.map((local) => ({
+      nome: local.nome,
+      horarioFuncionamento: local.horarioFuncionamento,
+      links: local.links || [],
+    })),
+    historicoDiario: dailyMetrics,
+  };
+  const campaignUpdate = await supabase.from("campaigns").update({
+    client_name: extracted.clienteNome || currentCampaign.client_name,
+    campaign_name: extracted.campanhaNome || currentCampaign.campaign_name,
+    period: extracted.periodo || currentCampaign.period,
+    days_accumulated: original.diasEmExibicaoTotal === undefined
+      ? numberFrom(currentCampaign.days_accumulated)
+      : extracted.diasEmExibicaoTotal,
+    total_impressions_accumulated: original.totalExibicoesHistorico === undefined
+      ? numberFrom(currentCampaign.total_impressions_accumulated)
+      : extracted.totalExibicoesHistorico,
+    report_summary: typeof report.ai_summary === "string" && report.ai_summary.trim()
+      ? report.ai_summary
+      : extracted.resumoRelatorio || currentCampaign.report_summary,
+    dashboard_metrics: dashboardMetrics,
+  }).eq("id", report.campaign_id);
+  if (campaignUpdate.error) throw new Error(campaignUpdate.error.message);
   const update = await supabase.from("pdf_reports").update({ status: "perfil_salvo" }).eq("id", uploadId);
   if (update.error) throw new Error(update.error.message);
-  const campaignResult = await supabase.from("campaigns").select("client_name,slug").eq("id", report.campaign_id).single();
-  const campaign = unwrap(campaignResult) as Row;
   return {
     db: await snapshot(),
-    clientName: String(campaign.client_name),
-    clientPath: `/c/${campaign.slug}`,
+    clientName: String(extracted.clienteNome || currentCampaign.client_name),
+    clientPath: `/c/${currentCampaign.slug}`,
   };
 }
 
@@ -364,7 +622,9 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
   const campaign = campaignFromRow(payload.campaign);
   const points = payload.points.map(pointFromRow);
   const screens = payload.screens.map(screenFromRow);
-  const daily = payload.dailyReports.map(dailyFromRow);
+  const daily = payload.dailyReports
+    .map(dailyFromRow)
+    .sort((left, right) => left.data.localeCompare(right.data));
   const metrics = campaign.metricasDashboard || {};
   const dashboardPerformance = new Map(
     (metrics.desempenhoPorTela || []).map((item) => [
@@ -579,7 +839,98 @@ export async function saveRelatorios(
       onConflict: "report_date,screen_id",
     });
     if (result.error) throw new Error(result.error.message);
+    await syncDashboardDailyHistory(items);
   }
+  return asDb(await snapshot());
+}
+
+async function syncDashboardDailyHistory(items: RelatorioDiarioTela[]): Promise<void> {
+  const screenIds = [...new Set(items.map((item) => item.telaId))];
+  if (!screenIds.length) return;
+  const supabase = getSupabase();
+  const selectedScreens = unwrap(
+    await supabase.from("screens").select("id,point_id").in("id", screenIds)
+  ) as Row[];
+  const pointIds = [...new Set(selectedScreens.map((row) => String(row.point_id)))];
+  if (!pointIds.length) return;
+  const selectedPoints = unwrap(
+    await supabase.from("points").select("id,campaign_id").in("id", pointIds)
+  ) as Row[];
+  const campaignByScreen = new Map<string, string>();
+  const screenIdsByCampaign = new Map<string, Set<string>>();
+  const pointCampaign = new Map(
+    selectedPoints.map((point) => [String(point.id), String(point.campaign_id)])
+  );
+  selectedScreens.forEach((screen) => {
+    const campaignId = pointCampaign.get(String(screen.point_id));
+    if (!campaignId) return;
+    campaignByScreen.set(String(screen.id), campaignId);
+  });
+  const campaignIds = [...new Set(pointCampaign.values())];
+  if (!campaignIds.length) return;
+  const allPoints = unwrap(
+    await supabase.from("points").select("id,campaign_id").in("campaign_id", campaignIds)
+  ) as Row[];
+  const allPointIds = allPoints.map((point) => String(point.id));
+  const allScreens = allPointIds.length
+    ? unwrap(await supabase.from("screens").select("id,point_id").in("point_id", allPointIds)) as Row[]
+    : [];
+  const allPointCampaign = new Map(
+    allPoints.map((point) => [String(point.id), String(point.campaign_id)])
+  );
+  allScreens.forEach((screen) => {
+    const campaignId = allPointCampaign.get(String(screen.point_id));
+    if (!campaignId) return;
+    const campaignScreens = screenIdsByCampaign.get(campaignId) || new Set<string>();
+    campaignScreens.add(String(screen.id));
+    screenIdsByCampaign.set(campaignId, campaignScreens);
+  });
+  const campaigns = unwrap(
+    await supabase.from("campaigns").select("id,dashboard_metrics").in("id", campaignIds)
+  ) as Row[];
+
+  for (const campaign of campaigns) {
+    const campaignId = String(campaign.id);
+    const campaignItems = items.filter((item) => campaignByScreen.get(item.telaId) === campaignId);
+    const itemsByDate = new Map<string, RelatorioDiarioTela[]>();
+    campaignItems.forEach((item) =>
+      itemsByDate.set(item.data, [...(itemsByDate.get(item.data) || []), item])
+    );
+    const metrics = metricsFromValue(campaign.dashboard_metrics);
+    const existingHistory = metrics.historicoDiario || [];
+    const historyByDate = new Map(existingHistory.map((day) => [day.data, day]));
+    const datesToSync = existingHistory.length
+      ? existingHistory.map((day) => day.data)
+      : [...itemsByDate.keys()].sort();
+    const expectedScreenCount = screenIdsByCampaign.get(campaignId)?.size || 0;
+    for (const date of datesToSync) {
+      const dayItems = itemsByDate.get(date);
+      if (!dayItems || new Set(dayItems.map((item) => item.telaId)).size !== expectedScreenCount) continue;
+      const insertions = dayItems.reduce((sum, item) => sum + numberFrom(item.exibicoesEntregues), 0);
+      const hasFailure = dayItems.some((item) => item.falhaNominal);
+      historyByDate.set(date, {
+        data: date,
+        insercoes: insertions,
+        status: insertions === 0 ? "zerado" : hasFailure ? "alerta" : "normal",
+      });
+    }
+    const historicoDiario = [...historyByDate.values()].sort((left, right) =>
+      left.data.localeCompare(right.data)
+    );
+    const update = await supabase.from("campaigns").update({
+      dashboard_metrics: {
+        ...metrics,
+        historicoDiario,
+        insercoesPeriodo: historicoDiario.reduce((sum, day) => sum + numberFrom(day.insercoes), 0),
+      },
+    }).eq("id", campaignId);
+    if (update.error) throw new Error(update.error.message);
+  }
+}
+
+export async function deleteRelatorioDiario(reportId: string): Promise<{ db: WhiteVisionDb }> {
+  const result = await getSupabase().from("daily_screen_reports").delete().eq("id", reportId);
+  if (result.error) throw new Error(result.error.message);
   return asDb(await snapshot());
 }
 
