@@ -1,39 +1,17 @@
 import { requireAdmin } from "../_shared/admin.ts";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
-import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
+import pdfParse from "npm:pdf-parse@1.1.1";
+import { Buffer } from "node:buffer";
 
-const models = [
-  "gemini-1.5-flash",
-  "gemini-1.5-flash-8b",
-  "gemini-2.0-flash-exp",
-];
-const maxRetryRounds = 3;
-const retryDelayMs = 2_000;
-
-class GeminiJsonParseError extends Error {}
-
-class GeminiModelsExhaustedError extends Error {}
-
-class GeminiRequestError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly retryable: boolean
-  ) {
+class GroqResponseError extends Error {
+  constructor(message: string, readonly status = 502) {
     super(message);
   }
 }
 
-function base64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return btoa(binary);
-}
+class JsonParseError extends Error {}
 
-function cleanGeminiJson(text: string): string {
+function cleanJsonText(text: string): string {
   const withoutMarkdown = text
     .replace(/^\uFEFF/, "")
     .replace(/^\s*```(?:json)?\s*/i, "")
@@ -42,7 +20,7 @@ function cleanGeminiJson(text: string): string {
   const jsonStart = withoutMarkdown.indexOf("{");
   const jsonEnd = withoutMarkdown.lastIndexOf("}");
   if (jsonStart < 0 || jsonEnd < jsonStart) {
-    throw new GeminiJsonParseError("Gemini não retornou um objeto JSON.");
+    throw new JsonParseError("A IA não retornou um objeto JSON.");
   }
 
   const candidate = withoutMarkdown.slice(jsonStart, jsonEnd + 1);
@@ -104,7 +82,7 @@ function cleanGeminiJson(text: string): string {
   return sanitized;
 }
 
-function repairGeminiJsonSeparators(json: string): string {
+function repairJsonSeparators(json: string): string {
   let repaired = "";
   let inString = false;
   for (let index = 0; index < json.length; index += 1) {
@@ -157,54 +135,49 @@ function repairGeminiJsonSeparators(json: string): string {
   return repaired;
 }
 
-function parseGeminiJson(text: string) {
-  const sanitized = cleanGeminiJson(text);
+function parseGroqJson(text: string) {
+  const sanitized = cleanJsonText(text);
   try {
     const parsed = JSON.parse(sanitized);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new GeminiJsonParseError("A resposta precisa ser um objeto JSON.");
+      throw new JsonParseError("A resposta precisa ser um objeto JSON.");
     }
     return parsed;
   } catch (firstError) {
     try {
-      const parsed = JSON.parse(repairGeminiJsonSeparators(sanitized));
+      const parsed = JSON.parse(repairJsonSeparators(sanitized));
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
         throw new Error("A resposta recuperada não é um objeto JSON.");
       }
-      console.warn("Gemini JSON parsed after separator recovery.");
+      console.warn("Groq JSON parsed after separator recovery.");
       return parsed;
     } catch (recoveryError) {
       const detail = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
       const original = firstError instanceof Error ? firstError.message : String(firstError);
-      throw new GeminiJsonParseError(
-        `Resposta JSON inválida do Gemini; recuperação não foi possível (${detail}; original: ${original}).`
+      throw new JsonParseError(
+        `Resposta JSON inválida do Groq; recuperação não foi possível (${detail}; original: ${original}).`
       );
     }
   }
 }
 
-async function getGeminiKey(serviceClient: SupabaseClient) {
-  const { data, error } = await serviceClient
-    .from("private_settings")
-    .select("secret_value")
-    .eq("setting_key", "gemini_api_key")
-    .maybeSingle();
-  if (error) throw error;
-  const key = data?.secret_value || Deno.env.get("GEMINI_API_KEY");
-  if (!key) throw new Error("Configure a chave Gemini no painel ou como secret GEMINI_API_KEY.");
-  return key as string;
+async function extractPdfText(file: Blob): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  if (!buffer.byteLength) throw new Error("O arquivo PDF está vazio.");
+  const parsed = await pdfParse(Buffer.from(buffer));
+  const text = parsed.text.trim();
+  if (!text) throw new Error("Não foi possível extrair texto do PDF.");
+  return text;
 }
 
-async function callGemini(
+async function callGroq(
   apiKey: string,
-  pdfBase64: string,
+  pdfText: string,
   action: string
 ) {
-  const prompt = action === "summarize"
-    ? "Leia o PDF e retorne um resumo executivo curto e factual em português. Não invente informações."
-    : `Analise o PDF do relatório de mídia indoor e retorne somente JSON válido.
-Use somente dados explícitos do documento. Se um campo não existir, use string vazia, zero, lista vazia, null ou status desconhecido. Não invente dados.
-Schema:
+  const systemPrompt = action === "summarize"
+    ? `Leia o texto extraído do PDF e retorne um objeto JSON válido neste formato: {"resumoIA":"resumo executivo curto e factual em português"}. Não invente informações.`
+    : `Analise o texto extraído do relatório de mídia indoor e retorne exatamente um objeto JSON válido com esta estrutura:
 {
  "token":string,"clienteNome":string,"campanhaNome":string,"periodo":string,
  "diasEmExibicaoTotal":number,"totalExibicoesHistorico":number,
@@ -217,79 +190,54 @@ Schema:
    "telas":[{"localNome":string,"telaNome":string,"insercoes":number,"pagina":number,"evidencia":string,
    "status":"normal"|"alerta"|"zerado"|"desconhecido","observacaoFalha":string}]}]
 }
-Frequência de loop deve preservar unidade como aparece (por exemplo 30s ou a cada 3 min). Meta diária: usar valor explícito; se não existir, dividir inserções do período pelo número de dias no histórico e arredondar. O resumo deve conter o nome do cliente e uma síntese fiel.`;
+Use somente informações explícitas do documento. Para campos ausentes, use string vazia, zero, lista vazia, null ou status desconhecido. Não invente valores. Preserve a unidade da frequência de loop. Meta diária: use o valor explícito ou, se ausente, calcule inserções do período dividido pelo número de dias no histórico. O resumo deve incluir o nome do cliente.`;
 
-  let lastError: unknown;
-  for (let round = 1; round <= maxRetryRounds; round += 1) {
-    for (const modelName of models) {
-      try {
-        const endpoint =
-          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { text: prompt },
-                { inlineData: { mimeType: "application/pdf", data: pdfBase64 } },
-              ],
-            }],
-            generationConfig: action === "summarize"
-              ? { maxOutputTokens: 1024 }
-              : {
-                responseMimeType: "application/json",
-                maxOutputTokens: 8192,
-              },
-          }),
-        });
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: pdfText },
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.1,
+      max_tokens: 8192,
+    }),
+  });
 
-        const responseText = await response.text();
-        let payload: Record<string, unknown> = {};
-        try {
-          payload = responseText ? JSON.parse(responseText) : {};
-        } catch {
-          payload = { error: responseText.slice(0, 1200) };
-        }
-        if (!response.ok) {
-          throw new GeminiRequestError(
-            `Gemini ${response.status} (${modelName}): ${JSON.stringify(payload).slice(0, 1200)}`,
-            response.status,
-            true
-          );
-        }
-
-        const candidates = payload.candidates as
-          | Array<{ content?: { parts?: Array<{ text?: string }> } }>
-          | undefined;
-        const text = candidates?.[0]?.content?.parts
-          ?.map((part) => part.text || "")
-          .join("")
-          .trim();
-        if (!text) throw new Error(`Gemini não retornou conteúdo para ${modelName}.`);
-
-        const result = action === "summarize" ? text : parseGeminiJson(text);
-        console.log(`Gemini respondeu usando ${modelName} na rodada ${round}.`);
-        return result;
-      } catch (error) {
-        lastError = error;
-        console.warn(`[Fallback] Falha no modelo ${modelName}, tentando o próximo...`);
-        continue;
-      }
-    }
-
-    if (round < maxRetryRounds) {
-      console.warn(
-        `Todos os modelos falharam na rodada ${round}; nova tentativa em ${retryDelayMs} ms.`
-      );
-      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-    }
+  const responseText = await response.text();
+  let payload: Record<string, unknown>;
+  try {
+    payload = responseText ? JSON.parse(responseText) : {};
+  } catch {
+    throw new GroqResponseError(`Resposta inválida do Groq (HTTP ${response.status}).`);
+  }
+  if (!response.ok) {
+    throw new GroqResponseError(
+      `Groq ${response.status}: ${JSON.stringify(payload).slice(0, 1200)}`,
+      response.status
+    );
   }
 
-  const detail = lastError instanceof Error ? lastError.message : String(lastError);
-  throw new GeminiModelsExhaustedError(
-    `Todos os modelos Gemini falharam após ${maxRetryRounds} rodadas. Último erro: ${detail}`
-  );
+  const choices = payload.choices as
+    | Array<{ message?: { content?: string | null } }>
+    | undefined;
+  const content = choices?.[0]?.message?.content?.trim();
+  if (!content) throw new GroqResponseError("Groq não retornou conteúdo.");
+
+  const result = parseGroqJson(content);
+  if (action === "summarize") {
+    if (typeof result.resumoIA !== "string" || !result.resumoIA.trim()) {
+      throw new JsonParseError("Groq não retornou o campo resumoIA.");
+    }
+    return result.resumoIA;
+  }
+  return result;
 }
 
 Deno.serve(async (request) => {
@@ -313,22 +261,15 @@ Deno.serve(async (request) => {
       .from("report-pdfs")
       .download(upload.storage_path);
     if (fileError || !file) throw fileError || new Error("Arquivo PDF não encontrado.");
-    const apiKey = await getGeminiKey(serviceClient);
+    const apiKey = Deno.env.get("GROQ_API_KEY");
+    if (!apiKey) throw new Error("Configure a secret GROQ_API_KEY na Edge Function.");
     const action = body.action === "summarize" ? "summarize" : "analyze";
-    let pdfBase64: string;
-    try {
-      const pdfBuffer = await file.arrayBuffer();
-      if (pdfBuffer.byteLength === 0) throw new Error("O arquivo está vazio.");
-      pdfBase64 = base64(new Uint8Array(pdfBuffer));
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`Não foi possível ler o PDF salvo no Storage: ${detail}`);
-    }
-    const generated = await callGemini(apiKey, pdfBase64, action);
+    const pdfText = await extractPdfText(file);
+    const generated = await callGroq(apiKey, pdfText, action);
 
     if (action === "summarize") {
       if (typeof generated !== "string") {
-        throw new Error("Gemini retornou um formato inesperado para o resumo.");
+        throw new Error("Groq retornou um formato inesperado para o resumo.");
       }
       const { error } = await serviceClient.from("pdf_reports")
         .update({ ai_summary: generated })
@@ -338,7 +279,7 @@ Deno.serve(async (request) => {
     }
 
     if (typeof generated === "string") {
-      throw new Error("Gemini retornou texto em vez do JSON esperado para o relatório.");
+      throw new Error("Groq retornou texto em vez do JSON esperado para o relatório.");
     }
 
     if (!generated.clienteNome || !generated.resumoRelatorio) {
@@ -486,23 +427,15 @@ Deno.serve(async (request) => {
         console.error("Could not persist the PDF analysis error status.", statusUpdateError);
       }
     }
-    const status = error instanceof GeminiJsonParseError
-      ? 422
-      : error instanceof GeminiModelsExhaustedError
-      ? 500
-      : error instanceof GeminiRequestError
-      ? error.retryable ? 503 : 502
-      : /autenticação|sessão|acesso/i.test(message)
+    const status = /autenticação|sessão|acesso/i.test(message)
       ? 401
       : 500;
     return jsonResponse({
       error: message,
-      code: error instanceof GeminiJsonParseError
-        ? "INVALID_GEMINI_JSON"
-        : error instanceof GeminiModelsExhaustedError
-        ? "GEMINI_MODELS_EXHAUSTED"
-        : error instanceof GeminiRequestError
-        ? error.retryable ? "GEMINI_UNAVAILABLE" : "GEMINI_REQUEST_FAILED"
+      code: error instanceof JsonParseError
+        ? "INVALID_GROQ_JSON"
+        : error instanceof GroqResponseError
+        ? "GROQ_REQUEST_FAILED"
         : "ANALYSIS_FAILED",
     }, status);
   }
