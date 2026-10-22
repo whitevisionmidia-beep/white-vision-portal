@@ -1,4 +1,3 @@
-```tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Trash2,
@@ -21,6 +20,8 @@ import {
   fetchGroqKeyStatus,
   generatePdfReportSummary,
   importPdfReport,
+  persistirRelatorioExtraido,
+  fetchSeriesClientes,
   savePdfReport,
   savePdfReportToClient,
   deletePdfReport,
@@ -42,7 +43,7 @@ import {
 } from "../lib/supabaseAdminApi";
 import type {
   CampanhaCliente,
-  Ponto,
+  PontoTela,
   RelatorioDiarioTela,
   StatusCampanha,
   TelaPonto,
@@ -50,6 +51,7 @@ import type {
   WhiteVisionDb,
 } from "../types/adminDb";
 import type { RelatorioData } from "../types/whiteVision";
+import type { SerieClienteGrafico } from "../lib/supabaseAdminApi";
 import { DEFAULT_CLIENT_THEME } from "../types/whiteVision";
 import { getPublicMediaUrl } from "../lib/supabase";
 
@@ -64,21 +66,45 @@ function formatDia(isoDate: string): string {
   return cleaned;
 }
 
-function normalizeDateStr(d: any): string {
+/** Cores utilizadas para identificar cada série (cliente) no gráfico. */
+const CORES_SERIES = [
+  "#10b981",
+  "#38bdf8",
+  "#f472b6",
+  "#fbbf24",
+  "#a78bfa",
+  "#f87171",
+  "#22d3ee",
+  "#84cc16",
+];
+
+/**
+ * Normaliza uma data para YYYY-MM-DD.
+ * Aceita DD/MM/AAAA, DD-MM-AAAA e YYYY-MM-DD (com ou sem horário).
+ * Retorna string vazia quando a data não é interpretável com segurança.
+ */
+function normalizeDateStr(d: unknown): string {
   if (!d) return "";
   const s = String(d).trim();
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
-    const [day, month, year] = s.split("/");
+  if (!s) return "";
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  if (/^\d{4}\/\d{2}\/\d{2}/.test(s)) {
+    const [year, month, day] = s.slice(0, 10).split("/");
     return `${year}-${month}-${day}`;
   }
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
-    return s.slice(0, 10);
-  }
-  return s;
+  const br = /^(\d{2})[/-](\d{2})[/-](\d{4})$/.exec(s);
+  if (br) return `${br[3]}-${br[2]}-${br[1]}`;
+  return "";
 }
 
 /**
  * Extrator profundo de telas a partir do documento do PDF
+ *
+ * O contrato real devolvido pela IA (Edge Function `analyze-pdf`) é:
+ *   { "locais": [ { "nome": "...", "telas": [ { "nome": "...", "metaDiariaEsperada": n|null, ... } ] } ],
+ *     "historicoDiario": [ { "dia": "YYYY-MM-DD", "insercoes": n, "telas": [ { "localNome", "telaNome", ... } ] } ],
+ *     "desempenhoPorTela": [ { "localNome", "telaNome", ... } ] }
+ * As listas `telas`/`pontos` na raiz são aceitas apenas como formatos alternativos.
  */
 function extractScreensFromReport(
   rep: any,
@@ -88,90 +114,121 @@ function extractScreensFromReport(
 
   if (!rep) return [{ nome: "Painel Principal", metaDiaria: fallbackMeta }];
 
-  // 1. Telas explícitas na raiz do relatório
+  const registrar = (
+    nome: string,
+    pontoNome: string | undefined,
+    metaBruta: unknown,
+    metaInformada: boolean
+  ) => {
+    const chave = `${(pontoNome || "").toLowerCase()}::${nome.toLowerCase()}`;
+    if (screensMap.has(chave)) return;
+    const metaNumerica = Number(metaBruta);
+    screensMap.set(chave, {
+      nome,
+      // Só usa a meta quando ela veio preenchida no relatório; caso contrário
+      // mantém a meta geral do período (nunca inventa uma meta por tela).
+      metaDiaria:
+        metaInformada && Number.isFinite(metaNumerica) && metaNumerica > 0
+          ? metaNumerica
+          : fallbackMeta,
+      pontoNome,
+    });
+  };
+
+  // 1. Formato principal: locais[].telas[] com os nomes reais das telas.
+  if (Array.isArray(rep.locais)) {
+    for (const local of rep.locais) {
+      const localNome = String(local?.nome || "").trim();
+      const telas = Array.isArray(local?.telas) ? local.telas : [];
+      for (const tela of telas) {
+        const nome = String(
+          typeof tela === "string" ? tela : tela?.nome || tela?.tela || ""
+        ).trim();
+        if (!nome) continue;
+        const meta = typeof tela === "string" ? undefined : tela?.metaDiariaEsperada ?? tela?.metaDiaria;
+        registrar(nome, localNome || undefined, meta, meta !== undefined && meta !== null);
+      }
+    }
+  }
+
+  // 2. Formato alternativo: telas na raiz do relatório.
   if (Array.isArray(rep.telas)) {
     for (const t of rep.telas) {
       if (typeof t === "string" && t.trim()) {
-        screensMap.set(t.trim(), { nome: t.trim(), metaDiaria: fallbackMeta });
+        registrar(t.trim(), undefined, undefined, false);
       } else if (t && typeof t === "object") {
         const nome = String(t.nome || t.tela || t.local || t.screen || "").trim();
         if (nome) {
-          screensMap.set(nome, {
+          const meta = t.metaDiaria ?? t.meta;
+          registrar(
             nome,
-            metaDiaria: Number(t.metaDiaria || t.meta || fallbackMeta) || fallbackMeta,
-            pontoNome: t.ponto || t.pontoNome || t.local,
-          });
+            String(t.ponto || t.pontoNome || t.local || "").trim() || undefined,
+            meta,
+            meta !== undefined && meta !== null
+          );
         }
       }
     }
   }
 
-  // 2. Telas organizadas por pontos
+  // 3. Formato alternativo: pontos[].telas[].
   if (Array.isArray(rep.pontos)) {
     for (const p of rep.pontos) {
-      if (Array.isArray(p?.telas) && p.telas.length > 0) {
-        for (const t of p.telas) {
-          const tNome = typeof t === "string" ? t.trim() : String(t.nome || t.tela || "").trim();
-          if (tNome) {
-            const finalNome = p.nome && !tNome.includes(p.nome) ? `${p.nome} • ${tNome}` : tNome;
-            screensMap.set(finalNome, {
-              nome: finalNome,
-              metaDiaria: Number(t.metaDiaria || t.meta || fallbackMeta) || fallbackMeta,
-              pontoNome: p.nome,
-            });
-          }
-        }
-      } else if (p?.nome) {
-        const pNome = String(p.nome).trim();
-        if (pNome && !screensMap.has(pNome)) {
-          screensMap.set(pNome, {
-            nome: pNome,
-            metaDiaria: Number(p.metaDiaria || p.meta || fallbackMeta) || fallbackMeta,
-            pontoNome: pNome,
-          });
-        }
+      const pNome = String(p?.nome || "").trim();
+      const telas = Array.isArray(p?.telas) ? p.telas : [];
+      for (const t of telas) {
+        const tNome = String(typeof t === "string" ? t : t.nome || t.tela || "").trim();
+        if (!tNome) continue;
+        const meta = typeof t === "string" ? undefined : t.metaDiaria ?? t.meta;
+        registrar(tNome, pNome || undefined, meta, meta !== undefined && meta !== null);
       }
     }
   }
 
-  // 3. Telas identificadas dentro do histórico diário
+  // 4. Telas identificadas dentro do histórico diário (nome real + local real).
   const historico = rep.historicoDiario || rep.historico || rep.veiculacoesDiarias || [];
   if (Array.isArray(historico)) {
     for (const h of historico) {
       if (Array.isArray(h?.telas)) {
         for (const ht of h.telas) {
-          const nome = String(typeof ht === "string" ? ht : ht.nome || ht.tela || "").trim();
-          if (nome && !screensMap.has(nome)) {
-            screensMap.set(nome, {
-              nome,
-              metaDiaria: Number(ht.metaDiaria || ht.meta || fallbackMeta) || fallbackMeta,
-            });
-          }
+          const nome = String(
+            typeof ht === "string" ? ht : ht.nome || ht.tela || ""
+          ).trim();
+          const localNome = String(ht?.localNome || ht?.local || "").trim();
+          if (nome) registrar(nome, localNome || undefined, undefined, false);
         }
       } else if (h?.telas && typeof h.telas === "object") {
         for (const key of Object.keys(h.telas)) {
-          if (key.trim() && !screensMap.has(key.trim())) {
-            screensMap.set(key.trim(), { nome: key.trim(), metaDiaria: fallbackMeta });
-          }
+          if (key.trim()) registrar(key.trim(), undefined, undefined, false);
         }
       }
     }
   }
 
-  // 4. Tabelas detalhadas por tela
-  const detalhesTelas = rep.detalhesPorTela || rep.tabelasPorTela || rep.exibicoesPorTela;
-  if (detalhesTelas && typeof detalhesTelas === "object" && !Array.isArray(detalhesTelas)) {
-    for (const key of Object.keys(detalhesTelas)) {
-      if (key.trim() && !screensMap.has(key.trim())) {
-        screensMap.set(key.trim(), { nome: key.trim(), metaDiaria: fallbackMeta });
-      }
+  // 5. Desempenho por tela (nome real declarado no relatório).
+  if (Array.isArray(rep.desempenhoPorTela)) {
+    for (const item of rep.desempenhoPorTela) {
+      const nome = String(item?.telaNome || item?.nome || "").trim();
+      const localNome = String(item?.localNome || item?.local || "").trim();
+      if (nome) registrar(nome, localNome || undefined, undefined, false);
     }
   }
 
-  // Fallback se nenhuma tela foi identificada
+  // 6. Tabelas detalhadas por tela.
+  const detalhesTelas = rep.detalhesPorTela || rep.tabelasPorTela || rep.exibicoesPorTela;
+  if (detalhesTelas && typeof detalhesTelas === "object" && !Array.isArray(detalhesTelas)) {
+    for (const key of Object.keys(detalhesTelas)) {
+      if (key.trim()) registrar(key.trim(), undefined, undefined, false);
+    }
+  }
+
+  // Fallback explícito: nenhuma tela pôde ser identificada no relatório.
   if (screensMap.size === 0) {
-    const nomePadrao = rep.clienteNome ? `${rep.clienteNome} • Totem Principal` : "Totem Principal";
-    screensMap.set(nomePadrao, { nome: nomePadrao, metaDiaria: fallbackMeta });
+    const nomePadrao = rep.clienteNome ? `${rep.clienteNome} • Tela não identificada` : "Tela não identificada";
+    screensMap.set(`::${nomePadrao.toLowerCase()}`, {
+      nome: nomePadrao,
+      metaDiaria: fallbackMeta,
+    });
   }
 
   return Array.from(screensMap.values());
@@ -190,7 +247,19 @@ function extractDailyReportsFromReport(
   const detalhesPorTela = rep?.detalhesPorTela || rep?.tabelasPorTela || rep?.exibicoesPorTela;
 
   // Mapa: dataIso -> telaId -> dados
-  const matrix = new Map<string, Map<string, { exibicoes: number; meta: number; falha: boolean; obs: string }>>();
+  const matrix = new Map<
+    string,
+    Map<
+      string,
+      {
+        exibicoes: number;
+        meta: number;
+        falha: boolean;
+        obs: string;
+        status?: RelatorioDiarioTela["statusRelatorio"];
+      }
+    >
+  >();
 
   // 1. Extração se o PDF vier indexado por tela
   if (detalhesPorTela && typeof detalhesPorTela === "object" && !Array.isArray(detalhesPorTela)) {
@@ -222,10 +291,10 @@ function extractDailyReportsFromReport(
     }
   }
 
-  // 2. Extração do histórico diário padrão
+  // 2. Extração do histórico diário padrão (contrato real: `dia` + `telas[]`)
   if (Array.isArray(historico)) {
     for (const h of historico) {
-      const dataIso = normalizeDateStr(h?.data);
+      const dataIso = normalizeDateStr(h?.dia ?? h?.data);
       if (!dataIso) continue;
 
       if (!matrix.has(dataIso)) matrix.set(dataIso, new Map());
@@ -235,35 +304,43 @@ function extractDailyReportsFromReport(
       const metaDia = Number(h.meta ?? (fallbackMeta * telas.length));
       const falhaDia = Boolean(h.falha || h.queda);
       const obsDia = String(h.observacao || h.obs || "");
+      const statusDia = h.status as RelatorioDiarioTela["statusRelatorio"];
 
       // Caso o dia contenha detalhe em array por tela
       if (Array.isArray(h.telas)) {
         for (const ht of h.telas) {
-          const htNome = String(typeof ht === "string" ? ht : ht.nome || ht.tela || "").toLowerCase();
-          const matched = telas.find(
-            (t) =>
-              t.nome.toLowerCase() === htNome ||
-              t.nome.toLowerCase().includes(htNome) ||
-              htNome.includes(t.nome.toLowerCase())
-          );
+          const htNome = String(
+            typeof ht === "string" ? ht : ht.nome || ht.tela || ""
+          ).trim();
+          const htLocal = String(
+            typeof ht === "string" ? "" : ht.localNome || ht.local || ""
+          ).trim();
+          const matched = findTela(telas, htLocal, htNome);
           if (matched) {
+            const statusTela = (typeof ht === "string" ? undefined : ht.status) as
+              | RelatorioDiarioTela["statusRelatorio"]
+              | undefined;
             screenMap.set(matched.id, {
-              exibicoes: Number(ht.exibicoes ?? ht.insercoes ?? ht.total ?? 0),
-              meta: Number(ht.meta ?? matched.metaDiaria ?? fallbackMeta) || fallbackMeta,
-              falha: Boolean(ht.falha ?? falhaDia),
-              obs: String(ht.observacao ?? obsDia),
+              exibicoes: Number(
+                (typeof ht === "string" ? ht : ht.exibicoes) ?? ht?.insercoes ?? ht?.total ?? 0
+              ),
+              meta: Number((ht as any)?.meta ?? matched.metaDiaria ?? fallbackMeta) || fallbackMeta,
+              falha:
+                typeof ht === "string"
+                  ? falhaDia
+                  : Boolean(
+                      ht.falha ??
+                        ht.queda ??
+                        (statusTela === "alerta" || statusTela === "zerado")
+                    ),
+              obs: String((ht as any)?.observacao ?? (ht as any)?.observacaoFalha ?? obsDia),
+              status: statusTela ?? statusDia ?? (falhaDia ? "alerta" : "normal"),
             });
           }
         }
       } else if (h.telas && typeof h.telas === "object") {
         for (const [key, val] of Object.entries(h.telas)) {
-          const keyLow = key.toLowerCase();
-          const matched = telas.find(
-            (t) =>
-              t.nome.toLowerCase() === keyLow ||
-              t.nome.toLowerCase().includes(keyLow) ||
-              keyLow.includes(t.nome.toLowerCase())
-          );
+          const matched = findTela(telas, "", key);
           if (matched) {
             const numVal =
               typeof val === "number"
@@ -275,54 +352,73 @@ function extractDailyReportsFromReport(
               meta: Number((val as any)?.meta ?? matched.metaDiaria ?? fallbackMeta) || fallbackMeta,
               falha: Boolean((val as any)?.falha ?? falhaDia),
               obs: String((val as any)?.observacao ?? obsDia),
+              status: statusDia ?? (falhaDia ? "alerta" : "normal"),
             });
           }
-        }
-      }
-
-      // Distribui com precisão para qualquer tela restante do dia
-      const unmapped = telas.filter((t) => !screenMap.has(t.id));
-      if (unmapped.length > 0) {
-        const jaMapeadas = Array.from(screenMap.values()).reduce((sum, v) => sum + v.exibicoes, 0);
-        const restantes = Math.max(0, totalDia - jaMapeadas);
-        const quota = unmapped.length > 0 ? Math.round(restantes / unmapped.length) : 0;
-        const metaQuota = Math.round(metaDia / Math.max(1, telas.length));
-
-        for (const ut of unmapped) {
-          screenMap.set(ut.id, {
-            exibicoes: quota > 0 ? quota : totalDia > 0 ? Math.round(totalDia / telas.length) : 0,
-            meta: ut.metaDiaria || metaQuota || fallbackMeta,
-            falha: falhaDia,
-            obs: obsDia,
-          });
         }
       }
     }
   }
 
-  // Montagem final completa da lista
+  // Montagem final: apenas as telas que realmente constam no relatório.
+  // Telas sem informação no dia não recebem quantidade inventada.
   for (const [dataIso, screenMap] of matrix.entries()) {
-    for (const tela of telas) {
-      const entry = screenMap.get(tela.id) || {
-        exibicoes: 0,
-        meta: tela.metaDiaria || fallbackMeta,
-        falha: false,
-        obs: "",
-      };
+    for (const [telaId, entry] of screenMap.entries()) {
+      const tela = telas.find((item) => item.id === telaId);
       resultRows.push({
         id: crypto.randomUUID(),
         data: dataIso,
-        telaId: tela.id,
-        exibicoesEntregues: entry.exibicoes,
-        metaDiaria: entry.meta ?? tela.metaDiaria ?? fallbackMeta,
-        falhaNominal: entry.falha,
-        statusRelatorio: entry.falha ? "falha" : "sucesso",
-        observacaoFalha: entry.obs,
+        telaId,
+        exibicoesEntregues: Math.max(0, Number(entry.exibicoes) || 0),
+        metaDiaria: entry.meta ?? tela?.metaDiaria ?? fallbackMeta,
+        falhaNominal: Boolean(entry.falha),
+        statusRelatorio: normalizeStatusRelatorio(entry.status, entry.exibicoes),
+        observacaoFalha: entry.obs || "",
       });
     }
   }
 
   return resultRows;
+}
+
+/**
+ * Localiza a tela correspondente preservando a distinção entre telas de locais
+ * diferentes: só casa por nome quando o local declarado no relatório é o mesmo.
+ */
+function findTela(
+  telas: TelaPonto[],
+  localNome: string,
+  telaNome: string
+): TelaPonto | undefined {
+  const nomeAlvo = telaNome.toLowerCase().trim();
+  if (!nomeAlvo) return undefined;
+  const localAlvo = localNome.toLowerCase().trim();
+
+  const candidatos = localAlvo
+    ? telas.filter((tela) => tela.nome.toLowerCase().trim() === nomeAlvo)
+    : telas.filter((tela) => tela.nome.toLowerCase().trim() === nomeAlvo);
+
+  if (candidatos.length === 1) return candidatos[0];
+  if (candidatos.length > 1 && localAlvo) {
+    const porLocal = candidatos.find((tela) =>
+      tela.nome.toLowerCase().includes(localAlvo)
+    );
+    if (porLocal) return porLocal;
+  }
+  if (candidatos.length === 1) return candidatos[0];
+
+  // Correspondência por nome exato em qualquer tela (sem inventar associações).
+  return telas.find((tela) => tela.nome.toLowerCase().trim() === nomeAlvo);
+}
+
+/** Converte o status do relatório para o domínio aceito pelo banco. */
+function normalizeStatusRelatorio(
+  status: unknown,
+  exibicoes: number
+): RelatorioDiarioTela["statusRelatorio"] {
+  if (status === "normal" || status === "alerta" || status === "zerado") return status;
+  if (Number(exibicoes) === 0) return "zerado";
+  return "desconhecido";
 }
 
 export function AdminPage() {
@@ -335,7 +431,7 @@ export function AdminPage() {
 
   // Dados exclusivos do cliente selecionado (ISOLAMENTO TOTAL)
   const [campanhaDraft, setCampanhaDraft] = useState<CampanhaCliente | null>(null);
-  const [pontosDraft, setPontosDraft] = useState<Ponto[]>([]);
+  const [pontosDraft, setPontosDraft] = useState<PontoTela[]>([]);
   const [telasDraft, setTelasDraft] = useState<TelaPonto[]>([]);
   const [relatoriosDraft, setRelatoriosDraft] = useState<RelatorioDiarioTela[]>([]);
   const [videos, setVideos] = useState<VideoPortal[]>([]);
@@ -457,23 +553,30 @@ export function AdminPage() {
       const pontos = clientData.pontos || [];
       let telas = clientData.telas || [];
 
-      // Se não houver telas cadastradas no banco mas houver no dashboard do PDF
+      // Se não houver telas cadastradas no banco, usa os nomes reais de tela
+      // registrados no relatório (dashboard_metrics) apenas como leitura,
+      // sem criar registros fictícios no banco.
       if (telas.length === 0 && campanha?.metricasDashboard) {
         const metaDiariaGeral = Number(campanha.metricasDashboard.metaDiaria || 300);
         const extracted = extractScreensFromReport(campanha.metricasDashboard, metaDiariaGeral);
         telas = extracted.map((s, idx) => ({
-          id: crypto.randomUUID(),
+          id: `pendente-${idx}`,
           pontoId: `ponto-${idx}`,
           nome: s.nome,
           metaDiaria: s.metaDiaria,
-          status: "online",
+          status: "desconhecido" as const,
         }));
       }
 
       // Constrói os relatórios diários unificando banco e histórico
       let finalRelatorios: RelatorioDiarioTela[] = clientData.relatoriosDiarios || [];
 
-      if (finalRelatorios.length === 0 && campanha?.metricasDashboard && telas.length > 0) {
+      if (
+        finalRelatorios.length === 0 &&
+        campanha?.metricasDashboard &&
+        telas.length > 0 &&
+        telas.every((tela) => !tela.id.startsWith("pendente-"))
+      ) {
         finalRelatorios = extractDailyReportsFromReport(
           campanha.metricasDashboard,
           telas,
@@ -487,8 +590,8 @@ export function AdminPage() {
       setRelatoriosDraft(finalRelatorios);
 
       const themeWhatsapp =
-        (campanha.clientTheme as Record<string, unknown>)?.whatsapp ||
-        (campanha.clientTheme as Record<string, unknown>)?.whatsappNumber;
+        (campanha.clientTheme as unknown as Record<string, unknown> | undefined)?.whatsapp ??
+        (campanha.clientTheme as unknown as Record<string, unknown> | undefined)?.whatsappNumber;
       if (typeof themeWhatsapp === "string" && themeWhatsapp.trim()) {
         setAdminWhatsapp(themeWhatsapp.trim());
       }
@@ -575,6 +678,62 @@ export function AdminPage() {
     void load();
   }, []);
 
+  // Séries do gráfico: clientes que podem ser exibidos lado a lado.
+  const [seriesSelecionadas, setSeriesSelecionadas] = useState<string[]>([]);
+  const [series, setSeries] = useState<SerieClienteGrafico[]>([]);
+  const [carregandoSeries, setCarregandoSeries] = useState(false);
+  const [erroSeries, setErroSeries] = useState<string | null>(null);
+
+  // Mantém a seleção em sincronia com os clientes cadastrados.
+  useEffect(() => {
+    if (!db) return;
+    const ids = db.campanhas.map((campanha) => campanha.id);
+    setSeriesSelecionadas((previous) => {
+      const validos = previous.filter((id) => ids.includes(id));
+      if (validos.length) return validos;
+      return ids.length ? [ids[0]] : [];
+    });
+  }, [db]);
+
+  // Carrega as séries a partir do banco sempre que a seleção muda.
+  useEffect(() => {
+    if (!seriesSelecionadas.length) {
+      setSeries([]);
+      return;
+    }
+    let ativo = true;
+    setCarregandoSeries(true);
+    setErroSeries(null);
+    fetchSeriesClientes(seriesSelecionadas)
+      .then((resultado) => {
+        if (!ativo) return;
+        setSeries(resultado);
+      })
+      .catch((err) => {
+        if (!ativo) return;
+        setSeries([]);
+        setErroSeries(
+          `Não foi possível consultar os dados do gráfico: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      })
+      .finally(() => {
+        if (ativo) setCarregandoSeries(false);
+      });
+    return () => {
+      ativo = false;
+    };
+  }, [seriesSelecionadas]);
+
+  const alternarSerie = (campaignId: string) => {
+    setSeriesSelecionadas((previous) =>
+      previous.includes(campaignId)
+        ? previous.filter((id) => id !== campaignId)
+        : [...previous, campaignId]
+    );
+  };
+
   // Datas ordenadas
   const datasOrdenadas = useMemo(() => {
     const datesSet = new Set<string>();
@@ -587,56 +746,56 @@ export function AdminPage() {
     return Array.from(datesSet).filter(Boolean).sort().reverse();
   }, [relatoriosDraft, campanhaDraft?.metricasDashboard?.historicoDiario]);
 
-  // CÁLCULO DAS EXIBIÇÕES REAIS DO GRÁFICO
-  const dadosGrafico = useMemo(() => {
-    if (datasOrdenadas.length === 0) return [];
-
-    const datasGraf = [...datasOrdenadas].slice(0, 14).reverse();
-
-    return datasGraf.map((dataIso) => {
-      const registrosDoDia = relatoriosDraft.filter(
-        (r) => normalizeDateStr(r.data) === dataIso
-      );
-
-      let totalEntregue = registrosDoDia.reduce(
-        (sum, item) => sum + (Number(item.exibicoesEntregues) || 0),
-        0
-      );
-      let totalMeta = registrosDoDia.reduce(
-        (sum, item) => sum + (Number(item.metaDiaria) || 0),
-        0
-      );
-      let teveFalha = registrosDoDia.some((item) => item.falhaNominal);
-
-      // Resgate do histórico consolidado se necessário
-      if (totalEntregue === 0) {
-        const historicoItem = campanhaDraft?.metricasDashboard?.historicoDiario?.find(
-          (h) => normalizeDateStr(h.data) === dataIso
-        );
-        if (historicoItem) {
-          totalEntregue = Number(historicoItem.insercoes || historicoItem.exibicoes || historicoItem.total || 0);
-          totalMeta = Number(historicoItem.meta || campanhaDraft?.metricasDashboard?.metaDiaria || 0);
-          teveFalha = Boolean(historicoItem.falha);
-        }
-      }
-
-      return {
-        data: dataIso,
-        diaFormatado: formatDia(dataIso).slice(0, 5),
-        totalEntregue,
-        totalMeta,
-        teveFalha,
-      };
-    });
-  }, [datasOrdenadas, relatoriosDraft, campanhaDraft?.metricasDashboard]);
-
-  const maximoGrafico = useMemo(() => {
-    if (dadosGrafico.length === 0) return 100;
-    const maxVal = Math.max(
-      ...dadosGrafico.map((d) => Math.max(d.totalEntregue, d.totalMeta))
+  /**
+   * Série multi-cliente do gráfico, montada a partir do que está persistido.
+   * Cada cliente mantém a sua própria série; os dados nunca são misturados.
+   */
+  const graficoSeries = useMemo(() => {
+    const selecionadas = series.filter((serie) =>
+      seriesSelecionadas.includes(serie.campaignId)
     );
-    return Math.max(10, Math.ceil(maxVal * 1.15));
-  }, [dadosGrafico]);
+    if (!selecionadas.length) {
+      return { datas: [], maxValor: 100, series: [] };
+    }
+
+    const todasAsDatas = new Set<string>();
+    selecionadas.forEach((serie) =>
+      serie.serie.forEach((dia) => todasAsDatas.add(dia.data))
+    );
+    const datasOrdenadasGrafico = [...todasAsDatas].sort().slice(-14);
+
+    const maxValor = Math.max(
+      10,
+      ...selecionadas.flatMap((serie) =>
+        serie.serie.map((dia) => dia.insercoes)
+      )
+    );
+
+    return {
+      datas: datasOrdenadasGrafico,
+      maxValor: Math.ceil(maxValor * 1.15),
+      series: selecionadas.map((serie, index) => {
+        const porData = new Map(serie.serie.map((dia) => [dia.data, dia]));
+        return {
+          campaignId: serie.campaignId,
+          clienteNome: serie.clienteNome,
+          campanhaNome: serie.campanhaNome,
+          cor: CORES_SERIES[index % CORES_SERIES.length],
+          pontos: datasOrdenadasGrafico.map((data) => {
+            const dia = porData.get(data);
+            return {
+              data,
+              insercoes: dia?.insercoes ?? null,
+              status: dia?.status ?? "desconhecido",
+              temRegistro: dia?.temRegistro ?? false,
+            };
+          }),
+          totalInsercoes: serie.totalInsercoes,
+          totalTelas: serie.totalTelas,
+        };
+      }),
+    };
+  }, [series, seriesSelecionadas]);
 
   const totalGeralEntregue = useMemo(() => {
     const sumDraft = relatoriosDraft.reduce(
@@ -1012,62 +1171,18 @@ export function AdminPage() {
     setError(null);
     setImportedReport(null);
 
-    // 1. LIMPEZA TOTAL IMEDIATA: descarta telas antigas ou registros da memória
-    setTelasDraft([]);
-    setRelatoriosDraft([]);
-    setPontosDraft([]);
-
     try {
       const result = await importPdfReport(reportPdf, pdfClientId);
       applyDb(result.db);
 
-      // 2. Extrai automaticamente todas as telas reais do PDF
-      const metaDiariaGeral = Number(
-        result.totals?.metaDiaria || (result.report as any)?.metaDiaria || 300
-      );
-      const extractedScreens = extractScreensFromReport(result.report, metaDiariaGeral);
+      // 2. Persiste o relatório no cliente correto: garante os locais e as telas
+      //    REAIS do PDF (reaproveitando os registros já existentes) e grava os
+      //    registros diários por tela e data. Nada é gravado com IDs temporários.
+      const persisted = await persistirRelatorioExtraido(result.campaignId, result.report);
+      applyDb(persisted.db);
 
-      const freshTelas: TelaPonto[] = extractedScreens.map((s, idx) => ({
-        id: crypto.randomUUID(),
-        pontoId: s.pontoNome ? `ponto-${idx}` : `ponto-principal`,
-        nome: s.nome,
-        metaDiaria: s.metaDiaria,
-        status: "online",
-      }));
-
-      const freshPontos: Ponto[] = extractedScreens.map((s, idx) => ({
-        id: s.pontoNome ? `ponto-${idx}` : `ponto-principal`,
-        campanhaId: result.campaignId,
-        nome: s.pontoNome || s.nome,
-        cidade: "São Paulo",
-      }));
-
-      // 3. Preenche automaticamente as exibições por tela e dia extraídas do PDF
-      const freshRelatorios = extractDailyReportsFromReport(
-        result.report,
-        freshTelas,
-        metaDiariaGeral
-      );
-
-      // 4. Injeta imediatamente no estado para atualização dos componentes visuais
-      setPontosDraft(freshPontos);
-      setTelasDraft(freshTelas);
-      setRelatoriosDraft(freshRelatorios);
-
-      // 5. Grava as telas e relatórios extraídos no Supabase
-      try {
-        for (const tela of freshTelas) {
-          await saveTela(tela.id, {
-            nome: tela.nome,
-            metaDiaria: tela.metaDiaria,
-            status: tela.status,
-          });
-        }
-        await saveRelatorios(result.campaignId, freshRelatorios);
-      } catch (saveErr) {
-        console.warn("Aviso ao persistir dados extraídos do PDF:", saveErr);
-      }
-
+      // 3. Recarrega os dados do cliente a partir do banco, para que telas,
+      //    relatórios e gráfico reflitam exatamente o que foi persistido.
       await selectClientForAdmin(result.campaignId);
 
       setImportedReport({
@@ -1077,7 +1192,6 @@ export function AdminPage() {
         report: result.report,
         totals: result.totals,
       });
-
       setProfileSavedLink({
         clientName: result.clientName,
         clientPath: result.clientPath,
@@ -1086,7 +1200,7 @@ export function AdminPage() {
       setReportPdf(null);
       if (pdfInputRef.current) pdfInputRef.current.value = "";
       flash(
-        `PDF processado com sucesso! ${freshTelas.length} telas detectadas e ${freshRelatorios.length} registros diários sincronizados.`
+        `PDF processado com sucesso! ${persisted.telasCriadas} telas reais salvas e ${persisted.registrosDiarios} registros diários sincronizados.`
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1484,7 +1598,8 @@ export function AdminPage() {
               <div>
                 <h2 className="text-lg font-bold text-white flex items-center gap-2">
                   <BarChart3 size={18} className="text-sky-400" />
-                  Gráfico de Desempenho e Inserções — {campanhaDraft.clienteNome}
+                  Gráfico de Desempenho e Inserções
+                  {seriesSelecionadas.length === 1 && ` — ${campanhaDraft.clienteNome}`}
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
                   Visualização das entregas diárias versus metas das telas monitoradas no Supabase.
@@ -1504,6 +1619,52 @@ export function AdminPage() {
                   <span className="text-slate-300">Falha/Queda</span>
                 </div>
               </div>
+            </div>
+
+            {/* SELETOR DE SÉRIES (clientes exibidos no gráfico) */}
+            <div className="bg-slate-950/70 rounded-xl border border-slate-800 p-3.5 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-slate-300">
+                  Clientes exibidos no gráfico
+                </span>
+                {carregandoSeries && (
+                  <span className="text-[11px] text-sky-300 flex items-center gap-1.5 animate-pulse">
+                    <RefreshCw size={12} className="animate-spin" /> Atualizando...
+                  </span>
+                )}
+              </div>
+              {db.campanhas.length === 0 ? (
+                <p className="text-xs text-slate-500 italic">
+                  Nenhum cliente cadastrado para exibir no gráfico.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {db.campanhas.map((campanha, index) => {
+                    const selecionada = seriesSelecionadas.includes(campanha.id);
+                    const cor = CORES_SERIES[index % CORES_SERIES.length];
+                    return (
+                      <button
+                        key={campanha.id}
+                        type="button"
+                        onClick={() => alternarSerie(campanha.id)}
+                        aria-pressed={selecionada}
+                        className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition ${
+                          selecionada
+                            ? "border-slate-600 bg-slate-800 text-white"
+                            : "border-slate-800 bg-slate-900 text-slate-500 hover:text-slate-300"
+                        }`}
+                      >
+                        <span
+                          className="w-2.5 h-2.5 rounded-full inline-block"
+                          style={{ backgroundColor: selecionada ? cor : "#334155" }}
+                        />
+                        {campanha.clienteNome}
+                        {selecionada ? <Check size={11} /> : <Plus size={11} />}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* CARDS DE KPIS */}
@@ -1534,60 +1695,107 @@ export function AdminPage() {
               </div>
             </div>
 
-            {/* GRÁFICO DE BARRAS DINÂMICAS */}
-            {dadosGrafico.length === 0 ? (
+            {/* GRÁFICO DE BARRAS MULTI-CLIENTE */}
+            {erroSeries ? (
+              <div className="py-12 text-center text-xs text-rose-300 bg-rose-950/30 rounded-xl border border-rose-500/30 px-4">
+                {erroSeries}
+              </div>
+            ) : carregandoSeries && series.length === 0 ? (
+              <div className="py-12 text-center text-xs text-sky-300 bg-slate-950/40 rounded-xl border border-slate-800/80 flex items-center justify-center gap-2">
+                <RefreshCw size={14} className="animate-spin" /> Carregando dados do gráfico...
+              </div>
+            ) : !graficoSeries || graficoSeries.series.length === 0 ? (
               <div className="py-12 text-center text-xs text-slate-500 bg-slate-950/40 rounded-xl border border-slate-800/80">
                 Nenhum relatório diário registrado ainda para gerar o gráfico de desempenho.
               </div>
             ) : (
               <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-800 space-y-2">
+                <div className="flex flex-wrap items-center gap-3 text-[11px] font-medium">
+                  {graficoSeries.series.map((serie) => (
+                    <div key={serie.campaignId} className="flex items-center gap-1.5">
+                      <span
+                        className="w-3 h-3 rounded inline-block"
+                        style={{ backgroundColor: serie.cor }}
+                      />
+                      <span className="text-slate-300">
+                        {serie.clienteNome}
+                        {graficoSeries.series.length > 1 && (
+                          <span className="text-slate-500">
+                            {" "}— {serie.totalInsercoes.toLocaleString("pt-BR")} inserções
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
                 <div className="h-44 flex items-end gap-2 sm:gap-3 justify-between pt-6 px-2">
-                  {dadosGrafico.map((d) => {
-                    const alturaEntregue = Math.min(
-                      100,
-                      Math.max(d.totalEntregue > 0 ? 5 : 0, Math.round((d.totalEntregue / maximoGrafico) * 100))
-                    );
-                    const alturaMeta = Math.min(
-                      100,
-                      Math.max(d.totalMeta > 0 ? 5 : 0, Math.round((d.totalMeta / maximoGrafico) * 100))
-                    );
-
-                    return (
-                      <div key={d.data} className="flex-1 flex flex-col items-center h-full justify-end group relative">
-                        {/* Tooltip Hover */}
-                        <div className="absolute -top-12 z-20 hidden group-hover:flex flex-col items-center bg-slate-900 border border-slate-700 px-2 py-1 rounded shadow-xl text-[10px] text-slate-200 pointer-events-none whitespace-nowrap">
-                          <span>Data: {formatDia(d.data)}</span>
-                          <span className="font-bold text-emerald-300">Entregue: {d.totalEntregue.toLocaleString("pt-BR")}</span>
-                          <span className="text-sky-300">Meta: {d.totalMeta.toLocaleString("pt-BR")}</span>
-                          {d.teveFalha && <span className="text-rose-400 font-bold">Falha registrada</span>}
-                        </div>
-
-                        {/* Barras Lado a Lado */}
-                        <div className="w-full flex items-end justify-center gap-1 h-full">
-                          {/* Barra de Meta */}
-                          <div
-                            style={{ height: `${alturaMeta}%` }}
-                            className="w-2 sm:w-3 bg-sky-500/30 rounded-t transition-all"
-                            title={`Meta: ${d.totalMeta}`}
-                          />
-                          {/* Barra de Exibições */}
-                          <div
-                            style={{ height: `${alturaEntregue}%` }}
-                            className={`w-2.5 sm:w-4 rounded-t transition-all ${
-                              d.teveFalha
-                                ? "bg-rose-500 hover:bg-rose-400"
-                                : "bg-emerald-500 hover:bg-emerald-400"
-                            }`}
-                            title={`Entregue: ${d.totalEntregue}`}
-                          />
-                        </div>
-
-                        <span className="text-[10px] text-slate-400 mt-2 font-mono">
-                          {d.diaFormatado}
-                        </span>
+                  {graficoSeries.datas.map((data) => (
+                    <div
+                      key={data}
+                      className="flex-1 flex flex-col items-center h-full justify-end group relative"
+                    >
+                      <div className="absolute -top-16 z-20 hidden group-hover:flex flex-col items-center bg-slate-900 border border-slate-700 px-2 py-1 rounded shadow-xl text-[10px] text-slate-200 pointer-events-none whitespace-nowrap">
+                        <span>Data: {formatDia(data)}</span>
+                        {graficoSeries.series.map((serie) => {
+                          const ponto = serie.pontos.find((p) => p.data === data);
+                          return (
+                            <span
+                              key={serie.campaignId}
+                              className="font-bold"
+                              style={{ color: serie.cor }}
+                            >
+                              {serie.clienteNome}:{" "}
+                              {ponto?.temRegistro
+                                ? ponto.insercoes?.toLocaleString("pt-BR")
+                                : "sem dados"}
+                            </span>
+                          );
+                        })}
                       </div>
-                    );
-                  })}
+
+                      <div className="w-full flex items-end justify-center gap-1 h-full">
+                        {graficoSeries.series.map((serie) => {
+                          const ponto = serie.pontos.find((p) => p.data === data);
+                          // Sem informação no relatório para a data: não inventa zero.
+                          if (!ponto || !ponto.temRegistro) {
+                            return (
+                              <div
+                                key={serie.campaignId}
+                                className="w-2.5 sm:w-4 rounded-t border border-dashed border-slate-700 bg-slate-900/60"
+                                style={{ height: "6%" }}
+                                title={`${serie.clienteNome}: sem informação para ${formatDia(data)}`}
+                              />
+                            );
+                          }
+                          const altura = Math.min(
+                            100,
+                            Math.max(
+                              (ponto.insercoes ?? 0) > 0 ? 5 : 0,
+                              Math.round(((ponto.insercoes ?? 0) / graficoSeries.maxValor) * 100)
+                            )
+                          );
+                          const falhou = ponto.status === "alerta";
+                          return (
+                            <div
+                              key={serie.campaignId}
+                              style={{
+                                height: `${altura}%`,
+                                backgroundColor: falhou ? "#f43f5e" : serie.cor,
+                              }}
+                              className="w-2.5 sm:w-4 rounded-t transition-all hover:opacity-80"
+                              title={`${serie.clienteNome} — ${formatDia(data)}: ${
+                                ponto.insercoes?.toLocaleString("pt-BR") ?? 0
+                              } inserções${falhou ? " (falha/queda)" : ""}`}
+                            />
+                          );
+                        })}
+                      </div>
+
+                      <span className="text-[10px] text-slate-400 mt-2 font-mono">
+                        {formatDia(data).slice(0, 5)}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -2517,4 +2725,3 @@ export function AdminPage() {
 }
 
 export default AdminPage;
-```

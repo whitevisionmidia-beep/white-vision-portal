@@ -465,7 +465,33 @@ Deno.serve(async (request) => {
       periodo: normalizedReport.periodo || campaign.period,
       totalExibicoesPeriodo: normalizedReport.insercoesPeriodo,
     };
+    // Preserva o histórico diário já consolidado do cliente: o relatório novo
+    // entra por cima apenas das datas que ele cobre, sem apagar dias de
+    // relatórios anteriores (nenhum registro válido é substituído indevidamente).
+    const previousMetrics = (campaign.dashboard_metrics ?? {}) as Record<string, unknown>;
+    const previousHistory = Array.isArray(previousMetrics.historicoDiario)
+      ? (previousMetrics.historicoDiario as Array<Record<string, unknown>>)
+          .map((day) => ({
+            data: typeof day.data === "string" ? day.data : "",
+            insercoes: Number(day.insercoes) || 0,
+            status: day.status === "normal" || day.status === "alerta" || day.status === "zerado"
+              ? day.status
+              : "desconhecido",
+          }))
+          .filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day.data))
+      : [];
+    const historyByDate = new Map<string, { data: string; insercoes: number; status: string }>();
+    previousHistory.forEach((day) => historyByDate.set(day.data, day));
+    report.historicoDiario.forEach((day) => {
+      historyByDate.set(day.dia, {
+        data: day.dia,
+        insercoes: day.insercoes,
+        status: day.status,
+      });
+    });
+
     const metricas = {
+      ...previousMetrics,
       insercoesPeriodo: report.insercoesPeriodo,
       metaDiaria: report.metaDiaria,
       telasAtivas: report.telasAtivas,
@@ -488,11 +514,9 @@ Deno.serve(async (request) => {
           }
         }),
       })),
-      historicoDiario: report.historicoDiario.map((day) => ({
-        data: day.dia,
-        insercoes: day.insercoes,
-        status: day.status,
-      })),
+      historicoDiario: [...historyByDate.values()].sort((left, right) =>
+        left.data.localeCompare(right.data)
+      ),
     };
     const campaignUpdate = await serviceClient.from("campaigns").update({
       client_name: report.clienteNome,
@@ -508,6 +532,7 @@ Deno.serve(async (request) => {
     const screenIdByName = new Map<string, string>();
     const screenTargetById = new Map<string, number | null>();
     for (const local of report.locais) {
+      // Reutiliza o local já persistido em vez de criar um novo a cada importação.
       const pointResult = await serviceClient.from("points").upsert({
         campaign_id: upload.campaign_id,
         name: local.nome,
@@ -516,6 +541,8 @@ Deno.serve(async (request) => {
       }, { onConflict: "campaign_id,name" }).select("id").single();
       if (pointResult.error) throw pointResult.error;
       for (const screen of local.telas) {
+        // Reutiliza a tela já persistida (mesmo local + mesmo nome), evitando
+        // telas duplicadas a cada importação do mesmo relatório.
         const screenResult = await serviceClient.from("screens").upsert({
           point_id: pointResult.data.id,
           name: screen.nome,
@@ -535,15 +562,20 @@ Deno.serve(async (request) => {
         const normalizedLocal = screen.localNome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
         const normalizedScreen = screen.telaNome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
         const screenId = screenIdByName.get(`${normalizedLocal}::${normalizedScreen}`);
-        return screenId ? [{
+        if (!screenId) return [];
+        // Garante que o status gravado respeite o `check` do banco.
+        const reportStatus = screen.status === "normal" || screen.status === "alerta" || screen.status === "zerado"
+          ? screen.status
+          : "desconhecido";
+        return [{
           report_date: day.dia,
           screen_id: screenId,
-          impressions_delivered: screen.insercoes,
+          impressions_delivered: Math.max(0, screen.insercoes),
           daily_target: screenTargetById.get(screenId) ?? null,
-          nominal_failure: screen.status === "alerta" || screen.status === "zerado",
-          report_status: screen.status || "desconhecido",
+          nominal_failure: reportStatus === "alerta" || reportStatus === "zerado",
+          report_status: reportStatus,
           failure_note: screen.observacaoFalha || null,
-        }] : [];
+        }];
       })
     );
     if (dailyRows.length) {

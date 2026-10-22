@@ -3,6 +3,7 @@ import type {
   PdfReportUpload,
   PontoTela,
   RelatorioDiarioTela,
+  StatusTela,
   TelaPonto,
   VideoPortal,
   WhiteVisionDb,
@@ -49,6 +50,113 @@ function historyStatusFrom(value: unknown): HistoricoDiarioSnapshotItem["status"
   return value === "normal" || value === "alerta" || value === "zerado"
     ? value
     : "desconhecido";
+}
+
+/**
+ * Normaliza o status operacional de uma tela para o domínio aceito pelo
+ * `check` da tabela `screens` ('online', 'offline', 'desconhecido').
+ */
+export function screenStatusFrom(value: unknown): StatusTela {
+  return value === "online" || value === "offline" ? value : "desconhecido";
+}
+
+/**
+ * Normaliza o status de um relatório diário para o domínio aceito pelo
+ * `check` da tabela `daily_screen_reports.report_status`.
+ */
+export function reportStatusFrom(value: unknown): HistoricoDiarioSnapshotItem["status"] {
+  return historyStatusFrom(value);
+}
+
+/**
+ * Normaliza datas para o formato YYYY-MM-DD aceito pelo banco.
+ * Aceita YYYY-MM-DD (com ou sem horário), DD/MM/AAAA e DD-MM-AAAA.
+ * Retorna string vazia quando a data não pode ser interpretada com segurança.
+ */
+export function normalizeDateKey(value: unknown): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return "";
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  if (/^\d{4}\/\d{2}\/\d{2}/.test(raw)) {
+    const [year, month, day] = raw.slice(0, 10).split("/");
+    return `${year}-${month}-${day}`;
+  }
+  const br = /^(\d{2})[/-](\d{2})[/-](\d{4})$/.exec(raw);
+  if (br) return `${br[3]}-${br[2]}-${br[1]}`;
+  return "";
+}
+
+export interface SerieDiariaCliente {
+  data: string;
+  insercoes: number;
+  status: HistoricoDiarioSnapshotItem["status"];
+  /** Indica que existem registros diários (tela + data) persistidos para a data. */
+  temRegistro: boolean;
+  /** Indica que a data possui registro para todas as telas do cliente. */
+  completa: boolean;
+}
+
+/**
+ * Calcula a série diária de um cliente a partir do que está realmente persistido:
+ * - `daily_screen_reports` (detalhe por tela e data);
+ * - `campaigns.dashboard_metrics.historicoDiario` (total do dia declarado no PDF).
+ * Datas ausentes em ambas as fontes não geram zeros artificiais: ficam sem registro.
+ */
+export function calcularSerieDiaria(
+  registros: RelatorioDiarioTela[],
+  historico: HistoricoDiarioSnapshotItem[],
+  totalTelas: number
+): SerieDiariaCliente[] {
+  const rowsByDate = new Map<string, RelatorioDiarioTela[]>();
+  registros.forEach((item) => {
+    const data = normalizeDateKey(item.data);
+    if (!data) return;
+    rowsByDate.set(data, [...(rowsByDate.get(data) || []), item]);
+  });
+
+  const historyByDate = new Map<string, HistoricoDiarioSnapshotItem>();
+  historico.forEach((day) => {
+    const data = normalizeDateKey(day.data);
+    if (data && !historyByDate.has(data)) historyByDate.set(data, day);
+  });
+
+  const dates = new Set<string>([...rowsByDate.keys(), ...historyByDate.keys()]);
+  return [...dates]
+    .sort((left, right) => left.localeCompare(right))
+    .map((data) => {
+      const rows = rowsByDate.get(data) || [];
+      const history = historyByDate.get(data);
+      const soma = rows.reduce((sum, item) => sum + numberFrom(item.exibicoesEntregues), 0);
+      const algumaFalha = rows.some((item) => item.falhaNominal);
+      const completa = totalTelas > 0 && rows.length >= totalTelas;
+
+      let insercoes: number;
+      if (rows.length === 0) {
+        // Sem detalhe por tela: usa exclusivamente o total declarado no relatório.
+        insercoes = history ? numberFrom(history.insercoes) : 0;
+      } else if (completa) {
+        // Detalhe completo: o total é a soma real das telas do dia.
+        insercoes = soma;
+      } else {
+        // Detalhe parcial: preserva o total do relatório e nunca o reduz.
+        insercoes = history ? Math.max(numberFrom(history.insercoes), soma) : soma;
+      }
+
+      const status: HistoricoDiarioSnapshotItem["status"] =
+        algumaFalha || history?.status === "alerta"
+          ? "alerta"
+          : insercoes === 0
+          ? "zerado"
+          : "normal";
+
+      return {
+        data,
+        insercoes,
+        status,
+        temRegistro: rows.length > 0 || Boolean(history),
+        completa,
+      };
+    });
 }
 
 function themeFromValue(value: unknown): ClientTheme {
@@ -581,8 +689,8 @@ export async function savePdfReportToClient(
   const dailyMetrics = (Array.isArray(original.historicoDiario) ? original.historicoDiario : [])
     .flatMap((value) => {
       const day = recordFrom(value);
-      const date = String(day.dia || day.data || "");
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
+      const date = normalizeDateKey(day.dia || day.data);
+      if (!date) return [];
       return [{
         data: date,
         insercoes: numberFrom(day.insercoes),
@@ -590,6 +698,26 @@ export async function savePdfReportToClient(
       }];
     })
     .sort((left, right) => left.data.localeCompare(right.data));
+
+  // Preserva o histórico já consolidado do cliente: o relatório novo entra por
+  // cima das datas que ele cobre, sem apagar os dias de relatórios anteriores.
+  const existingMetrics = metricsFromValue(
+    (unwrap(await supabase
+      .from("campaigns")
+      .select("dashboard_metrics")
+      .eq("id", report.campaign_id)
+      .single()) as Row).dashboard_metrics
+  );
+  const historyByDate = new Map<string, HistoricoDiarioSnapshotItem>();
+  (existingMetrics.historicoDiario || []).forEach((day) => {
+    const data = normalizeDateKey(day.data);
+    if (data) historyByDate.set(data, { ...day, data });
+  });
+  dailyMetrics.forEach((day) => historyByDate.set(day.data, day));
+  const historicoDiario = [...historyByDate.values()].sort((left, right) =>
+    left.data.localeCompare(right.data)
+  );
+
   const dashboardMetrics: DashboardMetrics = {
     insercoesPeriodo: extracted.totalExibicoesPeriodo,
     metaDiaria: extracted.metaDiaria || 0,
@@ -600,7 +728,7 @@ export async function savePdfReportToClient(
       horarioFuncionamento: local.horarioFuncionamento,
       links: local.links || [],
     })),
-    historicoDiario: dailyMetrics,
+    historicoDiario,
   };
   const campaignUpdate = await supabase.from("campaigns").update({
     client_name: extracted.clienteNome || currentCampaign.client_name,
@@ -625,6 +753,230 @@ export async function savePdfReportToClient(
     clientName: String(extracted.clienteNome || currentCampaign.client_name),
     clientPath: `/c/${currentCampaign.slug}`,
   };
+}
+
+/**
+ * Persiste o relatório extraído do PDF no cliente correto:
+ * - garante o local (ponto) e as telas reais do PDF, reutilizando registros existentes;
+ * - grava os registros diários por tela e data (idempotente por `report_date` + `screen_id`);
+ * - mescla o histórico diário do cliente sem apagar dias de relatórios anteriores.
+ */
+export async function persistirRelatorioExtraido(
+  campaignId: string,
+  report: RelatorioData
+): Promise<{ db: WhiteVisionDb; telasCriadas: number; registrosDiarios: number }> {
+  const supabase = getSupabase();
+
+  // 1. Garante os locais (pontos) reais do PDF.
+  const pontoIdPorNome = new Map<string, string>();
+  for (const local of report.locais || []) {
+    const nome = local.nome.trim();
+    if (!nome) continue;
+    const pontoId = await ensurePonto(
+      campaignId,
+      nome,
+      local.endereco,
+      local.horarioFuncionamento
+    );
+    pontoIdPorNome.set(normalizeScreenKey(nome), pontoId);
+  }
+
+  // 2. Garante as telas reais do PDF, sem duplicar as já persistidas.
+  const telaIdPorChave = new Map<string, string>();
+  const metaPorTelaId = new Map<string, number | null>();
+  for (const local of report.locais || []) {
+    const pontoId = pontoIdPorNome.get(normalizeScreenKey(local.nome.trim()));
+    if (!pontoId) continue;
+    for (const tela of local.telas || []) {
+      const nome = tela.nome.trim();
+      if (!nome) continue;
+      const telaId = await ensureTela(
+        pontoId,
+        nome,
+        tela.metaDiariaEsperada ?? null,
+        screenStatusFrom(tela.status)
+      );
+      telaIdPorChave.set(
+        `${normalizeScreenKey(local.nome.trim())}::${normalizeScreenKey(nome)}`,
+        telaId
+      );
+      metaPorTelaId.set(telaId, tela.metaDiariaEsperada ?? null);
+    }
+  }
+
+  // 3. Grava os registros diários por tela e data.
+  const linhas: Record<string, unknown>[] = [];
+  for (const dia of report.historicoDiario || []) {
+    const data = normalizeDateKey(dia.dia);
+    if (!data) continue;
+    for (const tela of dia.telas || []) {
+      const chave = `${normalizeScreenKey(tela.localNome)}::${normalizeScreenKey(tela.telaNome)}`;
+      const telaId = telaIdPorChave.get(chave);
+      if (!telaId) continue;
+      linhas.push({
+        report_date: data,
+        screen_id: telaId,
+        impressions_delivered: Math.max(0, Number(tela.insercoes) || 0),
+        daily_target: metaPorTelaId.get(telaId) ?? null,
+        nominal_failure: reportStatusFrom(tela.status) === "alerta" || reportStatusFrom(tela.status) === "zerado",
+        report_status: reportStatusFrom(tela.status),
+        failure_note: tela.observacaoFalha || null,
+      });
+    }
+  }
+
+  const datasTocadas = [...new Set(linhas.map((row) => String(row.report_date)))];
+  if (linhas.length) {
+    const result = await supabase.from("daily_screen_reports").upsert(linhas, {
+      onConflict: "report_date,screen_id",
+    });
+    if (result.error) throw new Error(result.error.message);
+  }
+
+  // 4. Atualiza o histórico consolidado do cliente preservando os dias anteriores.
+  const historico = (report.historicoDiario || [])
+    .flatMap((dia) => {
+      const data = normalizeDateKey(dia.dia);
+      if (!data) return [];
+      return [{
+        data,
+        insercoes: Math.max(0, Number(dia.insercoes) || 0),
+        status: reportStatusFrom(dia.status),
+      }];
+    })
+    .sort((left, right) => left.data.localeCompare(right.data));
+
+  const campaignResult = await supabase
+    .from("campaigns")
+    .select("dashboard_metrics")
+    .eq("id", campaignId)
+    .single();
+  const metrics = metricsFromValue((unwrap(campaignResult) as Row).dashboard_metrics);
+  const historyByDate = new Map<string, HistoricoDiarioSnapshotItem>();
+  (metrics.historicoDiario || []).forEach((day) => {
+    const data = normalizeDateKey(day.data);
+    if (data) historyByDate.set(data, { ...day, data });
+  });
+  historico.forEach((day) => historyByDate.set(day.data, day));
+
+  const dashboardMetrics: DashboardMetrics = {
+    ...metrics,
+    insercoesPeriodo: report.insercoesPeriodo ?? report.totalExibicoesPeriodo,
+    metaDiaria: report.metaDiaria || metrics.metaDiaria || 0,
+    telasAtivas: report.telasAtivas || metrics.telasAtivas || 0,
+    desempenhoPorTela: report.desempenhoPorTela?.length
+      ? report.desempenhoPorTela
+      : metrics.desempenhoPorTela || [],
+    locais: report.locais?.length
+      ? report.locais.map((local) => ({
+          nome: local.nome,
+          horarioFuncionamento: local.horarioFuncionamento,
+          links: local.links || [],
+        }))
+      : metrics.locais || [],
+    historicoDiario: [...historyByDate.values()].sort((left, right) =>
+      left.data.localeCompare(right.data)
+    ),
+  };
+
+  const update = await supabase
+    .from("campaigns")
+    .update({ dashboard_metrics: dashboardMetrics })
+    .eq("id", campaignId);
+  if (update.error) throw new Error(update.error.message);
+
+  if (datasTocadas.length) {
+    await syncDashboardDailyHistory(campaignId, datasTocadas);
+  }
+
+  return {
+    db: await snapshot(),
+    telasCriadas: telaIdPorChave.size,
+    registrosDiarios: linhas.length,
+  };
+}
+
+export interface SerieClienteGrafico {
+  campaignId: string;
+  clienteNome: string;
+  campanhaNome: string;
+  serie: SerieDiariaCliente[];
+  totalInsercoes: number;
+  totalMeta: number;
+  totalTelas: number;
+}
+
+/**
+ * Carrega as séries diárias de vários clientes a partir do que está persistido,
+ * permitindo comparar clientes no gráfico sem misturar os dados entre eles.
+ */
+export async function fetchSeriesClientes(
+  campaignIds: string[]
+): Promise<SerieClienteGrafico[]> {
+  const supabase = getSupabase();
+  const ids = [...new Set(campaignIds.filter(Boolean))];
+  if (!ids.length) return [];
+
+  const campaignsResult = await supabase
+    .from("campaigns")
+    .select("id,client_name,campaign_name,dashboard_metrics")
+    .in("id", ids);
+  const campaigns = unwrap(campaignsResult) as Row[];
+
+  const pointsResult = await supabase.from("points").select("id,campaign_id").in("campaign_id", ids);
+  const points = unwrap(pointsResult) as Row[];
+  const pointIds = points.map((row) => String(row.id));
+  const pointCampaign = new Map<string, string>();
+  points.forEach((row) => pointCampaign.set(String(row.id), String(row.campaign_id)));
+
+  const screensResult = pointIds.length
+    ? await supabase.from("screens").select("id,point_id").in("point_id", pointIds)
+    : { data: [], error: null };
+  const screens = unwrap(screensResult) as Row[];
+  const screenIds = screens.map((row) => String(row.id));
+  const screenCampaign = new Map<string, string>();
+  screens.forEach((row) => {
+    const campaignId = pointCampaign.get(String(row.point_id));
+    if (campaignId) screenCampaign.set(String(row.id), campaignId);
+  });
+
+  const dailyResult = screenIds.length
+    ? await supabase
+        .from("daily_screen_reports")
+        .select("id,report_date,screen_id,impressions_delivered,daily_target,nominal_failure,report_status,failure_note")
+        .in("screen_id", screenIds)
+    : { data: [], error: null };
+  const daily = unwrap(dailyResult).map((row) => dailyFromRow(row as Row));
+
+  return campaigns.map((campaign) => {
+    const campaignId = String(campaign.id);
+    const metrics = metricsFromValue(campaign.dashboard_metrics);
+    const campaignScreenIds = new Set(
+      [...screenCampaign.entries()]
+        .filter(([, id]) => id === campaignId)
+        .map(([screenId]) => screenId)
+    );
+    const registros = daily.filter((item) => campaignScreenIds.has(item.telaId));
+    const serie = calcularSerieDiaria(
+      registros,
+      metrics.historicoDiario || [],
+      campaignScreenIds.size
+    );
+    const totalInsercoes = serie.reduce((sum, item) => sum + item.insercoes, 0);
+    const totalMeta = registros.reduce(
+      (sum, item) => sum + (item.metaDiaria ?? 0),
+      0
+    );
+    return {
+      campaignId,
+      clienteNome: String(campaign.client_name || ""),
+      campanhaNome: String(campaign.campaign_name || ""),
+      serie,
+      totalInsercoes,
+      totalMeta,
+      totalTelas: campaignScreenIds.size,
+    };
+  });
 }
 
 export async function deletePdfReport(uploadId: string): Promise<{ db: WhiteVisionDb }> {
@@ -668,6 +1020,10 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
   const localSnapshots = new Map(
     (metrics.locais || []).map((item) => [normalizeName(item.nome), item])
   );
+  const savedHistory = [...(metrics.historicoDiario || [])]
+    .sort((left, right) => left.data.localeCompare(right.data));
+  // `periodDates` precisa existir antes do uso dentro do `.map` abaixo.
+  const periodDates = new Set(savedHistory.map((item) => item.data));
   const reportPoints = localSnapshots.size
     ? points.filter((point) => localSnapshots.has(normalizeName(point.nome)))
     : points;
@@ -726,22 +1082,14 @@ export async function fetchPublicClientReport(slug: string): Promise<{ report: R
   });
   const dailyByDate = new Map<string, RelatorioDiarioTela[]>();
   daily.forEach((item) => dailyByDate.set(item.data, [...(dailyByDate.get(item.data) || []), item]));
-  const savedHistory = [...(metrics.historicoDiario || [])]
-    .sort((left, right) => left.data.localeCompare(right.data));
-  const periodDates = new Set(savedHistory.map((item) => item.data));
-  const historicoDiario = savedHistory.length
-    ? savedHistory.map((item) => ({
-        dia: `${item.data.slice(8, 10)}/${item.data.slice(5, 7)}`,
-        insercoes: item.insercoes,
-        status: item.status,
-      }))
-    : [...dailyByDate.entries()]
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([date, items]) => ({
-          dia: `${date.slice(8, 10)}/${date.slice(5, 7)}`,
-          insercoes: items.reduce((sum, item) => sum + item.exibicoesEntregues, 0),
-          status: items.some((item) => item.falhaNominal) ? "alerta" as const : "normal" as const,
-        }));
+  // A série do portal é calculada a partir do que está persistido (registros diários
+  // por tela + total declarado no relatório), preservando dias zerados reais.
+  const serie = calcularSerieDiaria(daily, savedHistory, screens.length);
+  const historicoDiario = serie.map((item) => ({
+    dia: `${item.data.slice(8, 10)}/${item.data.slice(5, 7)}`,
+    insercoes: item.insercoes,
+    status: item.status,
+  }));
   const totalPeriodo =
     metrics.insercoesPeriodo ?? historicoDiario.reduce((sum, item) => sum + item.insercoes, 0);
   const metaDiaria = metrics.metaDiaria ?? 0;
@@ -856,11 +1204,125 @@ export async function saveTela(
   body: Partial<TelaPonto>
 ): Promise<{ db: WhiteVisionDb }> {
   const update: Row = {};
+  if (body.nome !== undefined) update.name = body.nome;
   if (body.metaDiaria !== undefined) update.daily_target = body.metaDiaria;
   if (body.status !== undefined) update.status = body.status;
-  const result = await getSupabase().from("screens").update(update).eq("id", telaId);
+  const result = await getSupabase()
+    .from("screens")
+    .update(update)
+    .eq("id", telaId)
+    .select("id");
   if (result.error) throw new Error(result.error.message);
+  if (!result.data || result.data.length === 0) {
+    throw new Error("A tela informada não existe no banco de dados.");
+  }
   return asDb(await snapshot());
+}
+
+/** Normaliza um nome para comparação estável (sem acentos e em minúsculas). */
+export function normalizeScreenKey(value: string): string {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
+
+/**
+ * Garante que o local (ponto) exista para a campanha, reutilizando o registro
+ * persistido quando o mesmo local já existir (evita duplicar a cada importação).
+ */
+export async function ensurePonto(
+  campaignId: string,
+  nome: string,
+  endereco?: string,
+  horarioFuncionamento?: string
+): Promise<string> {
+  const supabase = getSupabase();
+  const trimmed = nome.trim();
+  const existing = await supabase
+    .from("points")
+    .select("id")
+    .eq("campaign_id", campaignId)
+    .eq("name", trimmed)
+    .maybeSingle();
+  if (existing.error) throw new Error(existing.error.message);
+  if (existing.data?.id) return String(existing.data.id);
+
+  const insert = await supabase
+    .from("points")
+    .insert({
+      campaign_id: campaignId,
+      name: trimmed,
+      address: endereco || "",
+      operating_hours: horarioFuncionamento || "",
+    })
+    .select("id")
+    .single();
+  if (insert.error) {
+    // Corrida de importação simultânea: recupera o registro criado pela outra execução.
+    const retry = await supabase
+      .from("points")
+      .select("id")
+      .eq("campaign_id", campaignId)
+      .eq("name", trimmed)
+      .maybeSingle();
+    if (retry.data?.id) return String(retry.data.id);
+    throw new Error(insert.error.message);
+  }
+  return String(insert.data.id);
+}
+
+/**
+ * Garante que a tela exista dentro do local, reutilizando o registro persistido
+ * quando o mesmo nome já existir para aquele local.
+ */
+export async function ensureTela(
+  pontoId: string,
+  nome: string,
+  metaDiaria: number | null,
+  status: StatusTela
+): Promise<string> {
+  const supabase = getSupabase();
+  const trimmed = nome.trim();
+  // O `check` do banco só aceita 'online', 'offline' e 'desconhecido'.
+  const safeStatus = screenStatusFrom(status);
+  const safeTarget = metaDiaria === null || metaDiaria === undefined
+    ? null
+    : Math.max(0, numberFrom(metaDiaria));
+  const existing = await supabase
+    .from("screens")
+    .select("id")
+    .eq("point_id", pontoId)
+    .eq("name", trimmed)
+    .maybeSingle();
+  if (existing.error) throw new Error(existing.error.message);
+  if (existing.data?.id) {
+    const update = await supabase
+      .from("screens")
+      .update({ daily_target: safeTarget, status: safeStatus })
+      .eq("id", existing.data.id);
+    if (update.error) throw new Error(update.error.message);
+    return String(existing.data.id);
+  }
+
+  const insert = await supabase
+    .from("screens")
+    .insert({
+      point_id: pontoId,
+      name: trimmed,
+      daily_target: safeTarget,
+      status: safeStatus,
+    })
+    .select("id")
+    .single();
+  if (insert.error) {
+    const retry = await supabase
+      .from("screens")
+      .select("id")
+      .eq("point_id", pontoId)
+      .eq("name", trimmed)
+      .maybeSingle();
+    if (retry.data?.id) return String(retry.data.id);
+    throw new Error(insert.error.message);
+  }
+  return String(insert.data.id);
 }
 
 export async function saveRelatorios(
@@ -881,28 +1343,62 @@ export async function saveRelatorios(
   if (items.some((item) => !campaignScreenIds.has(item.telaId))) {
     throw new Error("Há registros diários que não pertencem ao cliente selecionado.");
   }
-  const rows = items.map((item) => ({
+
+  // Normaliza as datas e remove duplicidades de (data, tela) antes de gravar,
+  // para que reimportar o mesmo relatório não gere quantidades duplicadas.
+  const byKey = new Map<string, RelatorioDiarioTela>();
+  items.forEach((item) => {
+    const data = normalizeDateKey(item.data);
+    if (!data) return;
+    const key = `${data}::${item.telaId}`;
+    if (!byKey.has(key)) byKey.set(key, { ...item, data });
+  });
+
+  const rows = [...byKey.values()].map((item) => ({
     report_date: item.data,
     screen_id: item.telaId,
-    impressions_delivered: item.exibicoesEntregues,
-    daily_target: item.metaDiaria,
-    nominal_failure: item.falhaNominal,
-    report_status: item.statusRelatorio,
-    failure_note: item.observacaoFalha,
+    impressions_delivered: Math.max(0, numberFrom(item.exibicoesEntregues)),
+    daily_target:
+      item.metaDiaria === null || item.metaDiaria === undefined
+        ? null
+        : Math.max(0, numberFrom(item.metaDiaria)),
+    nominal_failure: Boolean(item.falhaNominal),
+    report_status: normalizeReportStatus(item.statusRelatorio),
+    failure_note: item.observacaoFalha ? String(item.observacaoFalha).trim() : null,
   }));
   if (rows.length) {
     const result = await getSupabase().from("daily_screen_reports").upsert(rows, {
       onConflict: "report_date,screen_id",
     });
     if (result.error) throw new Error(result.error.message);
-    await syncDashboardDailyHistory(campaignId, items);
+    await syncDashboardDailyHistory(
+      campaignId,
+      [...new Set(rows.map((row) => row.report_date))]
+    );
   }
   return asDb(await snapshot());
 }
 
+/**
+ * Converte o status para o conjunto aceito pelo `check` da coluna
+ * `daily_screen_reports.report_status` ('normal' | 'alerta' | 'zerado' | 'desconhecido').
+ */
+function normalizeReportStatus(
+  value: RelatorioDiarioTela["statusRelatorio"]
+): "normal" | "alerta" | "zerado" | "desconhecido" {
+  return value === "normal" || value === "alerta" || value === "zerado"
+    ? value
+    : "desconhecido";
+}
+
+/**
+ * Recalcula `campaigns.dashboard_metrics.historicoDiario` a partir do que está
+ * realmente gravado em `daily_screen_reports`, preservando as datas já existentes
+ * que não foram tocadas por esta gravação (histórico legítimo de outros relatórios).
+ */
 async function syncDashboardDailyHistory(
   campaignId: string,
-  items: RelatorioDiarioTela[],
+  touchedDates: string[] = [],
   removedDates: string[] = []
 ): Promise<void> {
   const supabase = getSupabase();
@@ -912,21 +1408,74 @@ async function syncDashboardDailyHistory(
     .eq("id", campaignId)
     .single();
   const metrics = metricsFromValue((unwrap(campaignResult) as Row).dashboard_metrics);
-  const itemsByDate = new Map<string, RelatorioDiarioTela[]>();
-  items.forEach((item) =>
-    itemsByDate.set(item.data, [...(itemsByDate.get(item.data) || []), item])
-  );
-  const historyByDate = new Map((metrics.historicoDiario || []).map((day) => [day.data, day]));
+
+  const historyByDate = new Map<string, HistoricoDiarioSnapshotItem>();
+  (metrics.historicoDiario || []).forEach((day) => {
+    const data = normalizeDateKey(day.data);
+    if (data) historyByDate.set(data, { ...day, data });
+  });
   removedDates.forEach((date) => historyByDate.delete(date));
-  for (const [date, dayItems] of itemsByDate) {
-    const insertions = dayItems.reduce((sum, item) => sum + numberFrom(item.exibicoesEntregues), 0);
-    const hasFailure = dayItems.some((item) => item.falhaNominal);
-    historyByDate.set(date, {
-      data: date,
-      insercoes: insertions,
-      status: insertions === 0 ? "zerado" : hasFailure ? "alerta" : "normal",
-    });
+
+  const datesToRecalculate = [...new Set([...touchedDates, ...removedDates])]
+    .map((date) => normalizeDateKey(date))
+    .filter(Boolean);
+  if (datesToRecalculate.length) {
+    const pointResult = await supabase
+      .from("points")
+      .select("id")
+      .eq("campaign_id", campaignId);
+    const pointIds = unwrap(pointResult).map((row) => String((row as Row).id));
+    const screenResult = pointIds.length
+      ? await supabase.from("screens").select("id").in("point_id", pointIds)
+      : { data: [], error: null };
+    const screenIds = unwrap(screenResult).map((row) => String((row as Row).id));
+
+    if (screenIds.length) {
+      const dailyResult = await supabase
+        .from("daily_screen_reports")
+        .select("report_date,impressions_delivered,nominal_failure,screen_id")
+        .in("screen_id", screenIds)
+        .in("report_date", datesToRecalculate);
+      const rows = unwrap(dailyResult) as Row[];
+
+      const rowsByDate = new Map<string, Row[]>();
+      rows.forEach((row) => {
+        const date = normalizeDateKey(row.report_date);
+        if (!date) return;
+        rowsByDate.set(date, [...(rowsByDate.get(date) || []), row]);
+      });
+
+      datesToRecalculate.forEach((date) => {
+        const dayRows = rowsByDate.get(date);
+        if (!dayRows || dayRows.length === 0) {
+          // A data deixou de ter registros: remove do histórico consolidado.
+          historyByDate.delete(date);
+          return;
+        }
+        const insertions = dayRows.reduce(
+          (sum, row) => sum + numberFrom(row.impressions_delivered),
+          0
+        );
+        const hasFailure = dayRows.some((row) => Boolean(row.nominal_failure));
+        const previous = historyByDate.get(date);
+        historyByDate.set(date, {
+          data: date,
+          // Preserva o total declarado no relatório quando ele for maior que a soma
+          // do detalhe por tela (relatórios com decomposição parcial).
+          insercoes:
+            previous && numberFrom(previous.insercoes) > insertions
+              ? numberFrom(previous.insercoes)
+              : insertions,
+          status: hasFailure
+            ? "alerta"
+            : insertions === 0
+            ? "zerado"
+            : "normal",
+        });
+      });
+    }
   }
+
   const historicoDiario = [...historyByDate.values()].sort((left, right) =>
     left.data.localeCompare(right.data)
   );
@@ -976,7 +1525,8 @@ export async function deleteRelatorioDiario(
         .in("screen_id", screenIds)
     : { data: [], error: null };
   const remaining = unwrap(remainingResult).map((row) => dailyFromRow(row as Row));
-  await syncDashboardDailyHistory(campaignId, remaining, remaining.length ? [] : [String(report.report_date)]);
+  // Recalcula a data afetada a partir do que restou no banco.
+  await syncDashboardDailyHistory(campaignId, [String(report.report_date)]);
   return asDb(await snapshot());
 }
 

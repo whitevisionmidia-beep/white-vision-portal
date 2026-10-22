@@ -56,7 +56,6 @@ export interface HistoricoDiarioSnapshotItem {
   insercoes: number;
   status: "normal" | "alerta" | "zerado" | "desconhecido";
 }
-
 export interface ClientTheme {
   frameColor: string;
   topBannerText: string;
@@ -64,6 +63,8 @@ export interface ClientTheme {
   primaryColor: string;
   logoSize: number;
   logoBgColor: string;
+  /** WhatsApp oficial configurado pelo administrador para renovação de campanha. */
+  whatsapp?: string;
 }
 
 export const DEFAULT_CLIENT_THEME: ClientTheme = {
